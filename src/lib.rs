@@ -1,13 +1,20 @@
 use anyhow::{Context, Result, anyhow, bail};
 use image::{DynamicImage, GenericImageView, ImageBuffer, Rgba, imageops::FilterType};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const MAX_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
 const CELL_ASPECT_RATIO: f32 = 0.5;
 const TRIGONOMETRY_EPSILON: f32 = 1e-6;
+const MAX_ANIMATION_FRAMES: u32 = 10_000;
+const ANSI_HIDE_CURSOR: &str = "\x1b[?25l";
+const ANSI_SHOW_CURSOR: &str = "\x1b[?25h";
+const ANSI_CLEAR_SCREEN: &str = "\x1b[2J";
+const ANSI_HOME: &str = "\x1b[H";
+const ANSI_CLEAR_TO_END: &str = "\x1b[J";
+const TRANSPARENT_BLANK: Rgba<u8> = Rgba([255, 255, 255, 0]);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InputSource {
@@ -62,6 +69,25 @@ impl RenderOptions {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AnimationOptions {
+    pub render_options: RenderOptions,
+    pub degree_step: f32,
+    pub frame_delay: Duration,
+    pub loop_animation: bool,
+}
+
+impl Default for AnimationOptions {
+    fn default() -> Self {
+        Self {
+            render_options: RenderOptions::default(),
+            degree_step: 10.0,
+            frame_delay: Duration::from_millis(50),
+            loop_animation: true,
+        }
+    }
+}
+
 struct LoadedImage {
     bytes: Vec<u8>,
     hint: Option<String>,
@@ -74,8 +100,60 @@ pub fn render_source(source: InputSource, options: RenderOptions) -> Result<Stri
     Ok(render_image(&image, options))
 }
 
+pub fn render_animation_frame(
+    image: &DynamicImage,
+    options: RenderOptions,
+    rotation_degrees: f32,
+) -> String {
+    let image = prepare_animation_image(image, options);
+    let (layout_width, layout_height) = image.dimensions();
+    let rotated = rotate_about_center_fixed(&image, options.rotation_degrees + rotation_degrees);
+
+    render_image_with_layout(
+        &rotated,
+        RenderOptions {
+            rotation_degrees: 0.0,
+            ..options
+        },
+        layout_width,
+        layout_height,
+    )
+}
+
+pub fn animate_source<W: Write>(
+    source: InputSource,
+    options: AnimationOptions,
+    writer: &mut W,
+) -> Result<()> {
+    let frame_count = animation_frame_count(options.degree_step)?;
+    let loaded = load_source(source)?;
+    let image = decode_image(&loaded)?;
+
+    let mut terminal = AnimationTerminal::start(writer)?;
+    loop {
+        for frame_index in 0..frame_count {
+            let output = render_animation_frame(
+                &image,
+                options.render_options,
+                options.degree_step * frame_index as f32,
+            );
+
+            terminal.draw_frame(&output)?;
+
+            if !options.frame_delay.is_zero() {
+                std::thread::sleep(options.frame_delay);
+            }
+        }
+
+        if !options.loop_animation {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
 pub fn render_image(image: &DynamicImage, options: RenderOptions) -> String {
-    let columns = options.width.max(1);
     let rotated;
     let image = if should_rotate(options.rotation_degrees) {
         rotated = rotate_about_center(image, options.rotation_degrees);
@@ -83,8 +161,19 @@ pub fn render_image(image: &DynamicImage, options: RenderOptions) -> String {
     } else {
         image
     };
-    let (source_width, source_height) = image.dimensions();
-    let aspect = source_height as f32 / source_width.max(1) as f32;
+    let (layout_width, layout_height) = image.dimensions();
+
+    render_image_with_layout(image, options, layout_width, layout_height)
+}
+
+fn render_image_with_layout(
+    image: &DynamicImage,
+    options: RenderOptions,
+    layout_width: u32,
+    layout_height: u32,
+) -> String {
+    let columns = options.width.max(1);
+    let aspect = layout_height as f32 / layout_width.max(1) as f32;
     let rows = ((columns as f32 * aspect * CELL_ASPECT_RATIO).round() as u32).max(1);
     let sample_width = columns * 2;
     let sample_height = rows * 4;
@@ -98,11 +187,61 @@ pub fn render_image(image: &DynamicImage, options: RenderOptions) -> String {
     }
 }
 
+fn animation_frame_count(degree_step: f32) -> Result<u32> {
+    if !degree_step.is_finite() || degree_step == 0.0 {
+        bail!("animation degree step must be non-zero and finite");
+    }
+
+    let frame_count = (360.0 / degree_step.abs()).ceil() as u32;
+    if frame_count > MAX_ANIMATION_FRAMES {
+        bail!("animation degree step would produce more than {MAX_ANIMATION_FRAMES} frames");
+    }
+
+    Ok(frame_count.max(1))
+}
+
+struct AnimationTerminal<'writer, W: Write> {
+    writer: &'writer mut W,
+}
+
+impl<'writer, W: Write> AnimationTerminal<'writer, W> {
+    fn start(writer: &'writer mut W) -> Result<Self> {
+        write!(writer, "{ANSI_HIDE_CURSOR}{ANSI_CLEAR_SCREEN}{ANSI_HOME}")?;
+        writer.flush()?;
+        Ok(Self { writer })
+    }
+
+    fn draw_frame(&mut self, output: &str) -> Result<()> {
+        write!(self.writer, "{ANSI_HOME}{ANSI_CLEAR_TO_END}{output}")?;
+        self.writer.flush()?;
+        Ok(())
+    }
+}
+
+impl<W: Write> Drop for AnimationTerminal<'_, W> {
+    fn drop(&mut self) {
+        let _ = write!(self.writer, "{ANSI_SHOW_CURSOR}");
+        let _ = self.writer.flush();
+    }
+}
+
 fn should_rotate(degrees: f32) -> bool {
     degrees.is_finite() && degrees.rem_euclid(360.0).abs() > f32::EPSILON
 }
 
 fn rotate_about_center(image: &DynamicImage, degrees: f32) -> DynamicImage {
+    rotate_about_center_with_canvas(image, degrees, rotation_canvas_for_angle)
+}
+
+fn rotate_about_center_fixed(image: &DynamicImage, degrees: f32) -> DynamicImage {
+    rotate_about_center_with_canvas(image, degrees, fixed_rotation_canvas)
+}
+
+fn rotate_about_center_with_canvas(
+    image: &DynamicImage,
+    degrees: f32,
+    canvas_for: fn(u32, u32, f32, f32) -> RotationCanvas,
+) -> DynamicImage {
     let source = image.to_rgba8();
     let (width, height) = source.dimensions();
     if width == 0 || height == 0 {
@@ -114,7 +253,99 @@ fn rotate_about_center(image: &DynamicImage, degrees: f32) -> DynamicImage {
     let cos = snap_unit(radians.cos());
     let source_center_x = (width as f32 - 1.0) / 2.0;
     let source_center_y = (height as f32 - 1.0) / 2.0;
+    let canvas = canvas_for(width, height, sin, cos);
+    let mut output = ImageBuffer::from_pixel(canvas.width, canvas.height, TRANSPARENT_BLANK);
 
+    for output_y in 0..canvas.height {
+        for output_x in 0..canvas.width {
+            let rotated_x = output_x as f32 + canvas.min_x;
+            let rotated_y = output_y as f32 + canvas.min_y;
+            let source_x = rotated_x * cos + rotated_y * sin + source_center_x;
+            let source_y = -rotated_x * sin + rotated_y * cos + source_center_y;
+
+            let source_x = source_x.round() as i32;
+            let source_y = source_y.round() as i32;
+
+            if source_x >= 0 && source_y >= 0 && source_x < width as i32 && source_y < height as i32
+            {
+                let pixel = source.get_pixel(source_x as u32, source_y as u32);
+                output.put_pixel(output_x, output_y, *pixel);
+            }
+        }
+    }
+
+    DynamicImage::ImageRgba8(output)
+}
+
+fn prepare_animation_image(image: &DynamicImage, options: RenderOptions) -> DynamicImage {
+    let source = image.to_rgba8();
+    let Some(bounds) = ink_bounds(&source, options) else {
+        return DynamicImage::ImageRgba8(ImageBuffer::from_pixel(1, 1, TRANSPARENT_BLANK));
+    };
+
+    let mut output = ImageBuffer::from_pixel(bounds.width, bounds.height, TRANSPARENT_BLANK);
+    for y in 0..bounds.height {
+        for x in 0..bounds.width {
+            let pixel = source.get_pixel(bounds.x + x, bounds.y + y);
+            if pixel_is_ink(pixel, options) {
+                output.put_pixel(x, y, *pixel);
+            }
+        }
+    }
+
+    DynamicImage::ImageRgba8(output)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PixelBounds {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+fn ink_bounds(
+    image: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    options: RenderOptions,
+) -> Option<PixelBounds> {
+    let (width, height) = image.dimensions();
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0;
+    let mut max_y = 0;
+    let mut found_ink = false;
+
+    for y in 0..height {
+        for x in 0..width {
+            if pixel_is_ink(image.get_pixel(x, y), options) {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+                found_ink = true;
+            }
+        }
+    }
+
+    found_ink.then_some(PixelBounds {
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x + 1,
+        height: max_y - min_y + 1,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RotationCanvas {
+    min_x: f32,
+    min_y: f32,
+    width: u32,
+    height: u32,
+}
+
+fn rotation_canvas_for_angle(width: u32, height: u32, sin: f32, cos: f32) -> RotationCanvas {
+    let source_center_x = (width as f32 - 1.0) / 2.0;
+    let source_center_y = (height as f32 - 1.0) / 2.0;
     let corners = [
         (0.0, 0.0),
         (width as f32 - 1.0, 0.0),
@@ -139,27 +370,28 @@ fn rotate_about_center(image: &DynamicImage, degrees: f32) -> DynamicImage {
 
     let output_width = (max_x - min_x).ceil() as u32 + 1;
     let output_height = (max_y - min_y).ceil() as u32 + 1;
-    let mut output = ImageBuffer::from_pixel(output_width, output_height, Rgba([0, 0, 0, 0]));
 
-    for output_y in 0..output_height {
-        for output_x in 0..output_width {
-            let rotated_x = output_x as f32 + min_x;
-            let rotated_y = output_y as f32 + min_y;
-            let source_x = rotated_x * cos + rotated_y * sin + source_center_x;
-            let source_y = -rotated_x * sin + rotated_y * cos + source_center_y;
-
-            let source_x = source_x.round() as i32;
-            let source_y = source_y.round() as i32;
-
-            if source_x >= 0 && source_y >= 0 && source_x < width as i32 && source_y < height as i32
-            {
-                let pixel = source.get_pixel(source_x as u32, source_y as u32);
-                output.put_pixel(output_x, output_y, *pixel);
-            }
-        }
+    RotationCanvas {
+        min_x,
+        min_y,
+        width: output_width,
+        height: output_height,
     }
+}
 
-    DynamicImage::ImageRgba8(output)
+fn fixed_rotation_canvas(width: u32, height: u32, _sin: f32, _cos: f32) -> RotationCanvas {
+    let source_center_x = (width as f32 - 1.0) / 2.0;
+    let source_center_y = (height as f32 - 1.0) / 2.0;
+    let radius = (source_center_x.powi(2) + source_center_y.powi(2)).sqrt();
+    let side = (radius * 2.0).ceil() as u32 + 1;
+    let min = -radius;
+
+    RotationCanvas {
+        min_x: min,
+        min_y: min,
+        width: side,
+        height: side,
+    }
 }
 
 fn snap_unit(value: f32) -> f32 {

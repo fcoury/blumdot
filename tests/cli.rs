@@ -68,6 +68,49 @@ fn rotates_local_png_before_rendering() {
 }
 
 #[test]
+fn animates_local_png_with_ansi_redraws() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("logo.png");
+    fs::write(&path, tiny_png()).unwrap();
+
+    Command::cargo_bin("blumdot")
+        .unwrap()
+        .arg("animate")
+        .arg(&path)
+        .arg("180")
+        .arg("--width")
+        .arg("1")
+        .arg("--frame-delay-ms")
+        .arg("0")
+        .arg("--no-loop")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::starts_with("\x1b[?25l\x1b[2J\x1b[H")
+                .and(predicate::str::contains("\x1b[H\x1b[J"))
+                .and(predicate::str::contains("\x1b[?25h")),
+        );
+}
+
+#[test]
+fn animate_rejects_zero_degree_step() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("logo.png");
+    fs::write(&path, tiny_png()).unwrap();
+
+    Command::cargo_bin("blumdot")
+        .unwrap()
+        .arg("animate")
+        .arg(&path)
+        .arg("0")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "animation degree step must be non-zero",
+        ));
+}
+
+#[test]
 fn renders_local_svg_to_stdout() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("logo.svg");

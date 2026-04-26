@@ -1,16 +1,36 @@
 use anyhow::Result;
-use blumdot::{GlyphMode, InputSource, RenderOptions, render_source};
-use clap::Parser;
+use blumdot::{
+    AnimationOptions, GlyphMode, InputSource, RenderOptions, animate_source, render_source,
+};
+use clap::{Args as ClapArgs, Parser, Subcommand};
+use std::io;
+use std::time::Duration;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "blumdot",
-    about = "Render images as monochrome Unicode braille art"
+    about = "Render images as monochrome Unicode braille art",
+    arg_required_else_help = true
 )]
 struct Args {
-    /// Local image path or HTTP/HTTPS image URL.
-    input: String,
+    #[command(subcommand)]
+    command: Option<Command>,
 
+    /// Local image path or HTTP/HTTPS image URL.
+    input: Option<String>,
+
+    #[command(flatten)]
+    render: RenderArgs,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Rotate the source through a full circle and redraw it in place.
+    Animate(AnimateArgs),
+}
+
+#[derive(Clone, Copy, Debug, ClapArgs)]
+struct RenderArgs {
     /// Output width in braille cells.
     #[arg(short, long, default_value_t = 40)]
     width: u32,
@@ -36,6 +56,27 @@ struct Args {
     solid: bool,
 }
 
+#[derive(Debug, ClapArgs)]
+struct AnimateArgs {
+    /// Local image path or HTTP/HTTPS image URL.
+    input: String,
+
+    /// Degrees to rotate between animation frames.
+    #[arg(allow_hyphen_values = true)]
+    degrees: f32,
+
+    /// Milliseconds to wait between animation frames.
+    #[arg(long, default_value_t = 50)]
+    frame_delay_ms: u64,
+
+    /// Stop after one full rotation instead of looping forever.
+    #[arg(long)]
+    no_loop: bool,
+
+    #[command(flatten)]
+    render: RenderArgs,
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("error: {error:?}");
@@ -45,22 +86,45 @@ fn main() {
 
 fn run() -> Result<()> {
     let args = Args::parse();
-    let output = render_source(
-        InputSource::parse(args.input),
-        RenderOptions {
-            width: args.width,
-            threshold: args.threshold,
-            invert: args.invert,
-            alpha_cutoff: args.alpha_cutoff,
-            glyph_mode: if args.solid {
-                GlyphMode::Solid
-            } else {
-                GlyphMode::Braille
-            },
-            rotation_degrees: args.rotate,
-        },
-    )?;
 
-    println!("{output}");
+    match args.command {
+        Some(Command::Animate(animate)) => {
+            let mut stdout = io::stdout().lock();
+            animate_source(
+                InputSource::parse(animate.input),
+                AnimationOptions {
+                    render_options: render_options(animate.render),
+                    degree_step: animate.degrees,
+                    frame_delay: Duration::from_millis(animate.frame_delay_ms),
+                    loop_animation: !animate.no_loop,
+                },
+                &mut stdout,
+            )?;
+        }
+        None => {
+            let input = args
+                .input
+                .expect("clap requires an input unless a subcommand is used");
+            let output = render_source(InputSource::parse(input), render_options(args.render))?;
+
+            println!("{output}");
+        }
+    }
+
     Ok(())
+}
+
+fn render_options(args: RenderArgs) -> RenderOptions {
+    RenderOptions {
+        width: args.width,
+        threshold: args.threshold,
+        invert: args.invert,
+        alpha_cutoff: args.alpha_cutoff,
+        glyph_mode: if args.solid {
+            GlyphMode::Solid
+        } else {
+            GlyphMode::Braille
+        },
+        rotation_degrees: args.rotate,
+    }
 }

@@ -1,4 +1,4 @@
-use blumdot::{GlyphMode, RenderOptions, render_image};
+use blumdot::{GlyphMode, RenderOptions, render_animation_frame, render_image};
 use image::{DynamicImage, ImageBuffer, Rgba};
 
 #[test]
@@ -47,6 +47,44 @@ fn rotation_happens_before_terminal_aspect_sampling() {
     );
 
     assert_eq!(output, "\u{28ff}\u{28ff}");
+}
+
+#[test]
+fn animation_frame_keeps_terminal_layout_from_source_bounds() {
+    let image = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(8, 16, Rgba([0, 0, 0, 255])));
+
+    let output = render_animation_frame(&image, RenderOptions::default().with_width(8), 45.0);
+    let lines: Vec<_> = output.lines().collect();
+
+    assert_eq!(lines.len(), 8);
+    assert!(lines.iter().all(|line| line.chars().count() == 8));
+}
+
+#[test]
+fn animation_frame_ignores_blank_source_edges() {
+    let mut pixels = ImageBuffer::from_pixel(8, 8, Rgba([0, 0, 0, 0]));
+    for x in 0..8 {
+        pixels.put_pixel(x, 0, Rgba([255, 255, 255, 255]));
+        pixels.put_pixel(x, 7, Rgba([255, 255, 255, 255]));
+    }
+    for y in 0..8 {
+        pixels.put_pixel(0, y, Rgba([255, 255, 255, 255]));
+        pixels.put_pixel(7, y, Rgba([255, 255, 255, 255]));
+    }
+    for y in 3..5 {
+        for x in 3..5 {
+            pixels.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+        }
+    }
+    let image = DynamicImage::ImageRgba8(pixels);
+    let content_only =
+        DynamicImage::ImageRgba8(ImageBuffer::from_pixel(2, 2, Rgba([0, 0, 0, 255])));
+
+    let output = render_animation_frame(&image, RenderOptions::default().with_width(8), 45.0);
+    let content_output =
+        render_animation_frame(&content_only, RenderOptions::default().with_width(8), 45.0);
+
+    assert_eq!(output, content_output);
 }
 
 #[test]
