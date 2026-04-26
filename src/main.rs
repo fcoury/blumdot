@@ -1,5 +1,5 @@
 use anyhow::Result;
-use blumdot::{InputSource, RenderOptions, render_source};
+use blumdot::{GlyphMode, InputSource, RenderOptions, render_source};
 use clap::Parser;
 
 #[derive(Debug, Parser)]
@@ -26,6 +26,14 @@ struct Args {
     /// Alpha value below which pixels are treated as blank.
     #[arg(long, default_value_t = 16)]
     alpha_cutoff: u8,
+
+    /// Rotate the source image clockwise by this many degrees before rendering.
+    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+    rotate: f32,
+
+    /// Use Unicode quadrant block characters instead of braille dots.
+    #[arg(long)]
+    solid: bool,
 }
 
 fn main() {
@@ -44,6 +52,12 @@ fn run() -> Result<()> {
             threshold: args.threshold,
             invert: args.invert,
             alpha_cutoff: args.alpha_cutoff,
+            glyph_mode: if args.solid {
+                GlyphMode::Solid
+            } else {
+                GlyphMode::Braille
+            },
+            rotation_degrees: args.rotate,
         },
     )?;
 

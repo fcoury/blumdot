@@ -33,6 +33,41 @@ fn renders_local_png_to_stdout() {
 }
 
 #[test]
+fn renders_local_png_as_solid_blocks() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("logo.png");
+    fs::write(&path, tiny_png()).unwrap();
+
+    Command::cargo_bin("blumdot")
+        .unwrap()
+        .arg(&path)
+        .arg("--width")
+        .arg("1")
+        .arg("--solid")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("█\n█\n"));
+}
+
+#[test]
+fn rotates_local_png_before_rendering() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("logo.png");
+    fs::write(&path, tiny_png()).unwrap();
+
+    Command::cargo_bin("blumdot")
+        .unwrap()
+        .arg(&path)
+        .arg("--width")
+        .arg("2")
+        .arg("--rotate")
+        .arg("90")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\u{28ff}\u{28ff}\n"));
+}
+
+#[test]
 fn renders_local_svg_to_stdout() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("logo.svg");

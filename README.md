@@ -27,6 +27,7 @@ cargo run --release -- <input> [options]
 
 ```
 blumdot <input> [--width N] [--threshold N] [--invert] [--alpha-cutoff N]
+                [--rotate DEG]
 ```
 
 `<input>` is either a local image path or an `http(s)://` URL. Remote responses
@@ -38,6 +39,7 @@ are capped at 10 MiB.
 | `-t`, `--threshold` | `180`   | Luminance below this value becomes ink.                     |
 | `--invert`          | off     | Treat light pixels as ink instead of dark ones.             |
 | `--alpha-cutoff`    | `16`    | Alpha values below this are treated as blank.               |
+| `--rotate`          | `0`     | Rotate the source image clockwise before rendering.         |
 
 Examples:
 
@@ -45,6 +47,7 @@ Examples:
 blumdot logo.png --width 60
 blumdot https://example.com/icon.svg --invert
 blumdot photo.jpg --threshold 128 --width 80
+blumdot logo.png --rotate 90
 ```
 
 ## Library
