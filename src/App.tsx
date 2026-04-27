@@ -1,11 +1,13 @@
 import {
   IconColorPicker as ColorPicker,
+  IconDeviceFloppy as SaveIcon,
   IconDownload as Download,
   IconEraser as Eraser,
   IconEye as Eye,
   IconEyeOff as EyeOff,
   IconFolderOpen as FolderOpen,
   IconGridDots as GridDots,
+  IconHandStop as Hand,
   IconLayersSelected as Layers3,
   IconLine as Line,
   IconLoader2 as Loader2,
@@ -25,16 +27,22 @@ import {
   IconRotateClockwise as RotateCw,
   IconSettings as Settings,
   IconTrash as Trash2,
+  IconArrowBackUp as Undo,
+  IconArrowForwardUp as Redo,
   IconZoomIn as ZoomIn,
   IconZoomOut as ZoomOut,
 } from "@tabler/icons-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Terminal, useTerminal } from "@wterm/react";
 import "@wterm/react/css";
 import sampleCloudUrl from "../assets/codex-color.png";
 
-type Tool = "pencil" | "line" | "erase" | "picker";
+type DrawingTool = "pencil" | "line" | "erase";
+type Tool = DrawingTool | "picker" | "hand";
 type EffectKind = "none" | "rotate";
 type EditorZoom = "fit" | 2 | 4 | 8;
 type TerminalFont =
@@ -109,7 +117,57 @@ type WorkingEdit = {
   canvas: HTMLCanvasElement;
   start: Point;
   last: Point;
+  tool: DrawingTool;
+  layerId: string;
+  frame: number;
+  frameOnly: boolean;
+  before: LayerPaintSnapshot;
+};
+
+type WorkingPan = {
+  pointerId: number;
+  startClient: Point;
+  startOffset: Point;
+};
+
+type LayerPaintSnapshot = {
+  dataUrl: string;
+  frameEdits: Record<string, string>;
+};
+
+type PaintHistoryEntry = {
+  layerId: string;
+  before: LayerPaintSnapshot;
+  after: LayerPaintSnapshot;
+};
+
+type FramePropagationMode = "base" | "all" | "forward";
+
+type ProjectDocumentV1 = {
+  version: 1;
+  project: Project;
+  renderOptions: RenderOptions;
+  terminalSettings: TerminalSettings;
+  frameCount: number;
+  currentFrame: number;
+  playing: boolean;
+  selectedLayerId: string | null;
   tool: Tool;
+  lastDrawingTool: DrawingTool;
+  editorZoom: EditorZoom;
+  panOffset: Point;
+  brushSize: number;
+  brushColor: string;
+  frameOnly: boolean;
+  showCharacterGrid: boolean;
+  undoStack: PaintHistoryEntry[];
+  redoStack: PaintHistoryEntry[];
+};
+
+type DirtyChoice = "save" | "discard" | "cancel";
+
+type DirtyPromptState = {
+  actionLabel: string;
 };
 
 type OutputSize = {
@@ -169,12 +227,14 @@ const ansiDrawFrame = "\x1b[H\x1b[J";
 const ansiReturnHome = "\x1b[H";
 const ansiPreviewEnd = "\x1b[?25h";
 const previewRenderDelayMs = 320;
+const bloomdotExtension = ".bloomdot";
 
 function App() {
   const [project, setProject] = useState<Project | null>(null);
   const [renderOptions, setRenderOptions] = useState(defaultRenderOptions);
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
   const [tool, setTool] = useState<Tool>("pencil");
+  const [lastDrawingTool, setLastDrawingTool] = useState<DrawingTool>("pencil");
   const [brushSize, setBrushSize] = useState(14);
   const [brushColor, setBrushColor] = useState("#ffffff");
   const [terminalSettings, setTerminalSettings] = useState(defaultTerminalSettings);
@@ -182,6 +242,9 @@ function App() {
   const [showTerminalSettings, setShowTerminalSettings] = useState(false);
   const [showCharacterGrid, setShowCharacterGrid] = useState(false);
   const [editorZoom, setEditorZoom] = useState<EditorZoom>("fit");
+  const [panOffset, setPanOffset] = useState<Point>({ x: 0, y: 0 });
+  const [isAltPressed, setIsAltPressed] = useState(false);
+  const [isPanning, setIsPanning] = useState(false);
   const [frameOnly, setFrameOnly] = useState(true);
   const [frameCount, setFrameCount] = useState(36);
   const [frames, setFrames] = useState<string[]>([]);
@@ -189,8 +252,13 @@ function App() {
   const [currentFrame, setCurrentFrame] = useState(0);
   const [playing, setPlaying] = useState(true);
   const [isImporting, setIsImporting] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [isRendering, setIsRendering] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [documentPath, setDocumentPath] = useState<string | null>(null);
+  const [documentName, setDocumentName] = useState<string | null>(null);
+  const [isDirty, setIsDirty] = useState(false);
+  const [dirtyPrompt, setDirtyPrompt] = useState<DirtyPromptState | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewportRef = useRef<Viewport | null>(null);
   const workingEditRef = useRef<WorkingEdit | null>(null);
@@ -209,6 +277,12 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const { ref: terminalRef, write } = useTerminal();
   const [terminalReadyRevision, setTerminalReadyRevision] = useState(0);
+  const [undoStack, setUndoStack] = useState<PaintHistoryEntry[]>([]);
+  const [redoStack, setRedoStack] = useState<PaintHistoryEntry[]>([]);
+  const workingPanRef = useRef<WorkingPan | null>(null);
+  const savedDocumentFingerprintRef = useRef<string | null>(null);
+  const pendingCleanFingerprintRef = useRef(false);
+  const dirtyPromptResolveRef = useRef<((choice: DirtyChoice) => void) | null>(null);
 
   const selectedLayer = useMemo(
     () => project?.layers.find((layer) => layer.id === selectedLayerId) ?? null,
@@ -238,6 +312,75 @@ function App() {
   const zoomLabel = editorZoom === "fit" ? "Fit" : `${editorZoom * 100}%`;
   const terminalStyle = terminalPreviewStyle(terminalSettings);
   const terminalTypographyKey = terminalTypographySignature(terminalSettings);
+  const projectDocument = useMemo(
+    () =>
+      buildProjectDocument({
+        project,
+        renderOptions,
+        terminalSettings,
+        frameCount,
+        currentFrame,
+        playing,
+        selectedLayerId,
+        tool,
+        lastDrawingTool,
+        editorZoom,
+        panOffset,
+        brushSize,
+        brushColor,
+        frameOnly,
+        showCharacterGrid,
+        undoStack,
+        redoStack,
+      }),
+    [
+      brushColor,
+      brushSize,
+      currentFrame,
+      editorZoom,
+      frameCount,
+      frameOnly,
+      lastDrawingTool,
+      panOffset,
+      playing,
+      project,
+      redoStack,
+      renderOptions,
+      selectedLayerId,
+      showCharacterGrid,
+      terminalSettings,
+      tool,
+      undoStack,
+    ],
+  );
+  const projectDocumentFingerprint = useMemo(
+    () => (projectDocument ? projectDocumentFingerprintFor(projectDocument) : null),
+    [projectDocument],
+  );
+
+  useEffect(() => {
+    if (pendingCleanFingerprintRef.current && projectDocumentFingerprint) {
+      savedDocumentFingerprintRef.current = projectDocumentFingerprint;
+      pendingCleanFingerprintRef.current = false;
+      setIsDirty(false);
+      return;
+    }
+
+    setIsDirty(
+      projectDocumentFingerprint !== null &&
+        projectDocumentFingerprint !== savedDocumentFingerprintRef.current,
+    );
+  }, [projectDocumentFingerprint]);
+
+  useEffect(() => {
+    const titleName = documentName ?? "Untitled";
+    const title = `${isDirty ? "• " : ""}${titleName} — Blumdot`;
+    document.title = title;
+
+    if (isTauriEnvironment()) {
+      void getCurrentWindow().setTitle(title);
+    }
+  }, [documentName, isDirty]);
 
   const updateLayer = useCallback((layerId: string, patch: Partial<Layer>) => {
     setProject((current) => {
@@ -255,7 +398,7 @@ function App() {
   }, []);
 
   const importDataUrl = useCallback(
-    async (dataUrl: string, name: string) => {
+    async (dataUrl: string, name: string, clean = false) => {
       setIsImporting(true);
       setError(null);
       try {
@@ -276,6 +419,13 @@ function App() {
         setSelectedLayerId(layers[0]?.id ?? null);
         setCurrentFrame(0);
         setPlaying(true);
+        setUndoStack([]);
+        setRedoStack([]);
+        setPanOffset({ x: 0, y: 0 });
+        setDocumentPath(null);
+        setDocumentName(null);
+        savedDocumentFingerprintRef.current = null;
+        pendingCleanFingerprintRef.current = clean;
       } catch (caught) {
         setError(errorMessage(caught));
       } finally {
@@ -285,10 +435,10 @@ function App() {
     [renderOptions],
   );
 
-  const loadSample = useCallback(async () => {
+  const loadSample = useCallback(async (clean = false) => {
     const response = await fetch(sampleCloudUrl);
     const blob = await response.blob();
-    await importDataUrl(await blobToDataUrl(blob), "codex-color.png");
+    await importDataUrl(await blobToDataUrl(blob), "codex-color.png", clean);
   }, [importDataUrl]);
 
   const handleFile = useCallback(
@@ -297,6 +447,127 @@ function App() {
     },
     [importDataUrl],
   );
+
+  const resolveDirtyPrompt = useCallback((choice: DirtyChoice) => {
+    dirtyPromptResolveRef.current?.(choice);
+    dirtyPromptResolveRef.current = null;
+    setDirtyPrompt(null);
+  }, []);
+
+  const requestDirtyChoice = useCallback((actionLabel: string) => {
+    return new Promise<DirtyChoice>((resolve) => {
+      dirtyPromptResolveRef.current = resolve;
+      setDirtyPrompt({ actionLabel });
+    });
+  }, []);
+
+  const saveProject = useCallback(
+    async (saveAs = false) => {
+      if (!projectDocument) {
+        return false;
+      }
+
+      setIsSaving(true);
+      setError(null);
+      try {
+        let nextPath = documentPath;
+        if (saveAs || !nextPath) {
+          const selectedPath = await saveDialog({
+            defaultPath: ensureBloomdotExtension(documentName ?? "untitled"),
+            filters: [{ name: "Bloomdot Project", extensions: ["bloomdot"] }],
+          });
+          if (!selectedPath) {
+            return false;
+          }
+          nextPath = ensureBloomdotExtension(selectedPath);
+        }
+
+        await writeTextFile(nextPath, serializeProjectDocument(projectDocument));
+        setDocumentPath(nextPath);
+        setDocumentName(fileNameFromPath(nextPath));
+        savedDocumentFingerprintRef.current = projectDocumentFingerprint;
+        setIsDirty(false);
+        return true;
+      } catch (caught) {
+        setError(`Could not save project: ${errorMessage(caught)}`);
+        return false;
+      } finally {
+        setIsSaving(false);
+      }
+    },
+    [documentName, documentPath, projectDocument, projectDocumentFingerprint],
+  );
+
+  const ensureCanReplace = useCallback(
+    async (actionLabel: string) => {
+      if (!isDirty) {
+        return true;
+      }
+
+      const choice = await requestDirtyChoice(actionLabel);
+      if (choice === "cancel") {
+        return false;
+      }
+      if (choice === "discard") {
+        return true;
+      }
+
+      return saveProject();
+    },
+    [isDirty, requestDirtyChoice, saveProject],
+  );
+
+  const openProject = useCallback(async () => {
+    if (!(await ensureCanReplace("open another project"))) {
+      return;
+    }
+
+    setError(null);
+    try {
+      const path = await openDialog({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "Bloomdot Project", extensions: ["bloomdot"] }],
+      });
+      if (!path || Array.isArray(path)) {
+        return;
+      }
+
+      const rawDocument = await readTextFile(path);
+      const nextDocument = parseProjectDocument(rawDocument);
+      restoreProjectDocument(nextDocument, {
+        setProject,
+        setRenderOptions,
+        setTerminalSettings,
+        setFrameCount,
+        setCurrentFrame,
+        setPlaying,
+        setSelectedLayerId,
+        setTool,
+        setLastDrawingTool,
+        setEditorZoom,
+        setPanOffset,
+        setBrushSize,
+        setBrushColor,
+        setFrameOnly,
+        setShowCharacterGrid,
+        setUndoStack,
+        setRedoStack,
+      });
+      workingEditRef.current = null;
+      workingPanRef.current = null;
+      imageCacheRef.current.clear();
+      setFrames([]);
+      setRenderLayout(null);
+      setIsAltPressed(false);
+      setIsPanning(false);
+      setDocumentPath(path);
+      setDocumentName(fileNameFromPath(path));
+      pendingCleanFingerprintRef.current = true;
+    } catch (caught) {
+      setError(`Could not open project: ${errorMessage(caught)}`);
+    }
+  }, [ensureCanReplace]);
 
   const drawEditor = useCallback(
     async (overrideCanvas?: HTMLCanvasElement, linePreview?: Point) => {
@@ -328,8 +599,8 @@ function App() {
         ) || 1;
       const scale = editorZoom === "fit" ? fitScale : editorZoom;
       const viewport = {
-        x: (rect.width - project.width * scale) / 2,
-        y: (rect.height - project.height * scale) / 2,
+        x: (rect.width - project.width * scale) / 2 + (editorZoom === "fit" ? 0 : panOffset.x),
+        y: (rect.height - project.height * scale) / 2 + (editorZoom === "fit" ? 0 : panOffset.y),
         width: project.width * scale,
         height: project.height * scale,
         scale,
@@ -382,6 +653,7 @@ function App() {
       brushSize,
       currentFrame,
       editorZoom,
+      panOffset,
       project,
       renderLayout,
       selectedLayer,
@@ -544,8 +816,89 @@ function App() {
     };
   }, [project]);
 
+  const selectTool = useCallback((nextTool: Tool) => {
+    if (nextTool === "picker") {
+      setTool("picker");
+      return;
+    }
+
+    setTool(nextTool);
+    if (isDrawingTool(nextTool)) {
+      setLastDrawingTool(nextTool);
+    }
+  }, []);
+
+  const applyLayerPaintSnapshot = useCallback((layerId: string, snapshot: LayerPaintSnapshot) => {
+    setProject((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return {
+        ...current,
+        layers: current.layers.map((layer) =>
+          layer.id === layerId
+            ? {
+                ...layer,
+                data_url: snapshot.dataUrl,
+                frameEdits: { ...snapshot.frameEdits },
+              }
+            : layer,
+        ),
+      };
+    });
+  }, []);
+
+  const pushPaintHistory = useCallback((entry: PaintHistoryEntry) => {
+    setUndoStack((current) => [...current, entry]);
+    setRedoStack([]);
+  }, []);
+
+  const undoPaint = useCallback(() => {
+    const entry = undoStack.at(-1);
+    if (!entry) {
+      return;
+    }
+
+    applyLayerPaintSnapshot(entry.layerId, entry.before);
+    setUndoStack(undoStack.slice(0, -1));
+    setRedoStack((redo) => [...redo, entry]);
+  }, [applyLayerPaintSnapshot, undoStack]);
+
+  const redoPaint = useCallback(() => {
+    const entry = redoStack.at(-1);
+    if (!entry) {
+      return;
+    }
+
+    applyLayerPaintSnapshot(entry.layerId, entry.after);
+    setRedoStack(redoStack.slice(0, -1));
+    setUndoStack((undo) => [...undo, entry]);
+  }, [applyLayerPaintSnapshot, redoStack]);
+
+  const startPan = useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (editorZoom === "fit") {
+      return false;
+    }
+
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    workingPanRef.current = {
+      pointerId: event.pointerId,
+      startClient: { x: event.clientX, y: event.clientY },
+      startOffset: panOffset,
+    };
+    setIsPanning(true);
+    return true;
+  }, [editorZoom, panOffset]);
+
   const startEdit = useCallback(
     async (event: React.PointerEvent<HTMLCanvasElement>) => {
+      if (tool === "hand" || event.altKey || event.button === 1) {
+        startPan(event);
+        return;
+      }
+
       if (!project || (tool !== "picker" && !selectedLayer)) {
         return;
       }
@@ -564,6 +917,7 @@ function App() {
         );
         if (sampledColor) {
           setBrushColor(sampledColor);
+          setTool(lastDrawingTool);
         }
         return;
       }
@@ -584,7 +938,16 @@ function App() {
 
       const image = await loadCachedImage(effectiveLayerDataUrl(editingLayer, currentFrame), imageCacheRef.current);
       context.drawImage(image, 0, 0);
-      workingEditRef.current = { canvas: editCanvas, start: point, last: point, tool };
+      workingEditRef.current = {
+        canvas: editCanvas,
+        start: point,
+        last: point,
+        tool,
+        layerId: editingLayer.id,
+        frame: currentFrame,
+        frameOnly,
+        before: layerPaintSnapshot(editingLayer),
+      };
 
       if (tool !== "line") {
         paintStroke(context, point, point, tool, brushColor, brushSize);
@@ -595,16 +958,28 @@ function App() {
       brushColor,
       brushSize,
       currentFrame,
+      frameOnly,
+      lastDrawingTool,
       pointerToImagePoint,
       project,
       requestEditorDraw,
       selectedLayer,
+      startPan,
       tool,
     ],
   );
 
   const moveEdit = useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>) => {
+      const pan = workingPanRef.current;
+      if (pan && pan.pointerId === event.pointerId) {
+        setPanOffset({
+          x: pan.startOffset.x + event.clientX - pan.startClient.x,
+          y: pan.startOffset.y + event.clientY - pan.startClient.y,
+        });
+        return;
+      }
+
       const edit = workingEditRef.current;
       if (!edit) {
         return;
@@ -633,6 +1008,13 @@ function App() {
 
   const finishEdit = useCallback(
     async (event: React.PointerEvent<HTMLCanvasElement>) => {
+      const pan = workingPanRef.current;
+      if (pan && pan.pointerId === event.pointerId) {
+        workingPanRef.current = null;
+        setIsPanning(false);
+        return;
+      }
+
       const edit = workingEditRef.current;
       if (!edit || !project || !selectedLayer) {
         return;
@@ -646,42 +1028,35 @@ function App() {
 
       workingEditRef.current = null;
       const dataUrl = await canvasToDataUrl(edit.canvas);
-      setProject((current) => {
-        if (!current) {
-          return current;
-        }
-
-        return {
-          ...current,
-          layers: current.layers.map((layer) => {
-          if (layer.id !== selectedLayer.id) {
-            return layer;
-          }
-
-          if (!frameOnly) {
-            return { ...layer, data_url: dataUrl, frameEdits: {} };
-          }
-
-          return {
-            ...layer,
+      const after = edit.frameOnly
+        ? {
+            ...edit.before,
             frameEdits: {
-              ...layer.frameEdits,
-              [currentFrame]: dataUrl,
+              ...edit.before.frameEdits,
+              [edit.frame]: dataUrl,
             },
+          }
+        : {
+            dataUrl,
+            frameEdits: {},
           };
-        }),
-        };
+
+      applyLayerPaintSnapshot(edit.layerId, after);
+      pushPaintHistory({
+        layerId: edit.layerId,
+        before: edit.before,
+        after,
       });
       void drawEditor();
     },
     [
       brushColor,
       brushSize,
-      currentFrame,
       drawEditor,
-      frameOnly,
       pointerToImagePoint,
       project,
+      pushPaintHistory,
+      applyLayerPaintSnapshot,
       selectedLayer,
     ],
   );
@@ -691,32 +1066,163 @@ function App() {
       return;
     }
 
-    setProject((current) => {
-      if (!current) {
-        return current;
+    const before = layerPaintSnapshot(selectedLayer);
+    const { [currentFrame]: _removed, ...remaining } = selectedLayer.frameEdits;
+    const after = {
+      ...before,
+      frameEdits: remaining,
+    };
+    if (sameLayerPaintSnapshot(before, after)) {
+      return;
+    }
+
+    applyLayerPaintSnapshot(selectedLayer.id, after);
+    pushPaintHistory({
+      layerId: selectedLayer.id,
+      before,
+      after,
+    });
+  }, [applyLayerPaintSnapshot, currentFrame, pushPaintHistory, selectedLayer]);
+
+  const propagateCurrentFrame = useCallback(
+    (mode: FramePropagationMode) => {
+      if (!selectedLayer) {
+        return;
       }
 
-      return {
-        ...current,
-        layers: current.layers.map((layer) => {
-          if (layer.id !== selectedLayer.id) {
-            return layer;
-          }
+      const sourceDataUrl = effectiveLayerDataUrl(selectedLayer, currentFrame);
+      const before = layerPaintSnapshot(selectedLayer);
+      let after: LayerPaintSnapshot;
 
-          const { [currentFrame]: _removed, ...remaining } = layer.frameEdits;
-          return { ...layer, frameEdits: remaining };
-        }),
-      };
-    });
-  }, [currentFrame, selectedLayer]);
+      switch (mode) {
+        case "base": {
+          const { [currentFrame]: _removed, ...remaining } = before.frameEdits;
+          after = {
+            dataUrl: sourceDataUrl,
+            frameEdits: remaining,
+          };
+          break;
+        }
+        case "all":
+          after = {
+            dataUrl: sourceDataUrl,
+            frameEdits: {},
+          };
+          break;
+        case "forward": {
+          const frameEdits = { ...before.frameEdits };
+          for (let frame = currentFrame; frame < frameCount; frame += 1) {
+            if (sourceDataUrl === before.dataUrl) {
+              delete frameEdits[frame];
+            } else {
+              frameEdits[frame] = sourceDataUrl;
+            }
+          }
+          after = {
+            ...before,
+            frameEdits,
+          };
+          break;
+        }
+      }
+
+      if (sameLayerPaintSnapshot(before, after)) {
+        return;
+      }
+
+      applyLayerPaintSnapshot(selectedLayer.id, after);
+      pushPaintHistory({
+        layerId: selectedLayer.id,
+        before,
+        after,
+      });
+    },
+    [applyLayerPaintSnapshot, currentFrame, frameCount, pushPaintHistory, selectedLayer],
+  );
 
   const stepEditorZoom = useCallback((direction: -1 | 1) => {
     setEditorZoom((current) => {
       const index = editorZoomLevels.indexOf(current);
       const nextIndex = Math.max(0, Math.min(editorZoomLevels.length - 1, index + direction));
-      return editorZoomLevels[nextIndex];
+      const nextZoom = editorZoomLevels[nextIndex];
+      if (nextZoom === "fit") {
+        setPanOffset({ x: 0, y: 0 });
+      }
+      return nextZoom;
     });
   }, []);
+
+  const handleCanvasWheel = useCallback(
+    (event: React.WheelEvent<HTMLCanvasElement>) => {
+      if (!(event.metaKey || event.ctrlKey) || event.deltaY === 0) {
+        return;
+      }
+
+      event.preventDefault();
+      stepEditorZoom(event.deltaY < 0 ? 1 : -1);
+    },
+    [stepEditorZoom],
+  );
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Alt") {
+        setIsAltPressed(true);
+      }
+
+      const target = event.target;
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
+        return;
+      }
+
+      if (!event.metaKey && !event.ctrlKey && !event.altKey) {
+        const shortcutTool = toolShortcut(event.key);
+        if (shortcutTool) {
+          event.preventDefault();
+          selectTool(shortcutTool);
+          return;
+        }
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        void saveProject(event.shiftKey);
+        return;
+      }
+
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "z") {
+        return;
+      }
+
+      event.preventDefault();
+      if (event.shiftKey) {
+        redoPaint();
+      } else {
+        undoPaint();
+      }
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.key === "Alt") {
+        setIsAltPressed(false);
+      }
+    };
+    const onBlur = () => setIsAltPressed(false);
+
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [redoPaint, saveProject, selectTool, undoPaint]);
+
+  useEffect(() => {
+    if (editorZoom === "fit") {
+      setPanOffset({ x: 0, y: 0 });
+    }
+  }, [editorZoom]);
 
   const updateOutputWidth = useCallback((width: number) => {
     const nextWidth = clampOutputWidth(width);
@@ -766,8 +1272,45 @@ function App() {
     }
 
     didAutoLoadRef.current = true;
-    void loadSample();
+    void loadSample(true);
   }, [loadSample]);
+
+  useEffect(() => {
+    if (!isTauriEnvironment()) {
+      return;
+    }
+
+    let unlisten: (() => void) | undefined;
+    void getCurrentWindow()
+      .onCloseRequested(async (event) => {
+        if (!(await ensureCanReplace("close this project"))) {
+          event.preventDefault();
+          return;
+        }
+
+        event.preventDefault();
+        await getCurrentWindow().destroy();
+      })
+      .then((nextUnlisten) => {
+        unlisten = nextUnlisten;
+      });
+
+    return () => unlisten?.();
+  }, [ensureCanReplace]);
+
+  useEffect(() => {
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!isDirty) {
+        return;
+      }
+
+      event.preventDefault();
+      event.returnValue = "";
+    };
+
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [isDirty]);
 
   const thumbnailUrl = project?.layers[0]?.data_url;
   const currentFrameLabel = `${String(currentFrame + 1).padStart(2, "0")} / ${String(frameCount).padStart(2, "0")}`;
@@ -780,7 +1323,11 @@ function App() {
         event.preventDefault();
         const file = event.dataTransfer.files.item(0);
         if (file) {
-          void handleFile(file);
+          void (async () => {
+            if (await ensureCanReplace("import an image")) {
+              await handleFile(file);
+            }
+          })();
         }
       }}
     >
@@ -788,13 +1335,39 @@ function App() {
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">⠿</span>
           <span>Blumdot</span>
+          <span className="document-label" title={documentPath ?? undefined}>
+            {documentName ?? "Untitled"}
+            {isDirty && <span className="dirty-indicator" aria-label="Unsaved changes" />}
+          </span>
         </div>
         <div className="topbar-actions primary-actions">
-          <button className="button" onClick={() => fileInputRef.current?.click()} disabled={isImporting}>
+          <button className="button" onClick={() => void openProject()} disabled={isImporting || isSaving}>
+            <FolderOpen size={16} />
+            Open Project
+          </button>
+          <button className="button" onClick={() => void saveProject()} disabled={!project || isSaving}>
+            <SaveIcon size={16} />
+            Save
+          </button>
+          <button className="button ghost-button" onClick={() => void saveProject(true)} disabled={!project || isSaving}>
+            <SaveIcon size={16} />
+            Save As
+          </button>
+          <button className="button" onClick={() => fileInputRef.current?.click()} disabled={isImporting || isSaving}>
             <FolderOpen size={16} />
             Import
           </button>
-          <button className="button ghost-button" onClick={loadSample} disabled={isImporting}>
+          <button
+            className="button ghost-button"
+            onClick={() => {
+              void (async () => {
+                if (await ensureCanReplace("load the sample")) {
+                  await loadSample();
+                }
+              })();
+            }}
+            disabled={isImporting || isSaving}
+          >
             <FileImage size={16} />
             Sample
           </button>
@@ -839,7 +1412,11 @@ function App() {
             onChange={(event) => {
               const file = event.currentTarget.files?.item(0);
               if (file) {
-                void handleFile(file);
+                void (async () => {
+                  if (await ensureCanReplace("import an image")) {
+                    await handleFile(file);
+                  }
+                })();
               }
               event.currentTarget.value = "";
             }}
@@ -850,17 +1427,20 @@ function App() {
       <section className="workspace">
         <aside className="left-rail">
           <div className="tool-group" aria-label="Tools">
-            <ToolButton active={tool === "pencil"} label="Pencil" onClick={() => setTool("pencil")}>
+            <ToolButton active={tool === "pencil"} label="Pencil" onClick={() => selectTool("pencil")}>
               <Pencil size={20} />
             </ToolButton>
-            <ToolButton active={tool === "line"} label="Line" onClick={() => setTool("line")}>
+            <ToolButton active={tool === "line"} label="Line" onClick={() => selectTool("line")}>
               <Line size={20} stroke={1.8} />
             </ToolButton>
-            <ToolButton active={tool === "erase"} label="Erase" onClick={() => setTool("erase")}>
+            <ToolButton active={tool === "erase"} label="Erase" onClick={() => selectTool("erase")}>
               <Eraser size={20} />
             </ToolButton>
-            <ToolButton active={tool === "picker"} label="Pick color" onClick={() => setTool("picker")}>
+            <ToolButton active={tool === "picker"} label="Pick color" onClick={() => selectTool("picker")}>
               <ColorPicker size={20} />
+            </ToolButton>
+            <ToolButton active={tool === "hand"} label="Pan" onClick={() => selectTool("hand")}>
+              <Hand size={20} />
             </ToolButton>
             <ToolButton active={false} label="Select" onClick={() => undefined}>
               <Pointer size={20} />
@@ -1019,6 +1599,32 @@ function App() {
                   <Trash2 size={15} />
                   Clear Frame
                 </button>
+                <div className="frame-propagation">
+                  <span>Propagate</span>
+                  <div className="frame-propagation-actions">
+                    <button
+                      className="button secondary"
+                      onClick={() => propagateCurrentFrame("base")}
+                      title="Use this frame as the shared base while keeping other frame edits"
+                    >
+                      To Base
+                    </button>
+                    <button
+                      className="button secondary"
+                      onClick={() => propagateCurrentFrame("all")}
+                      title="Use this frame for every frame and clear other frame edits"
+                    >
+                      All Frames
+                    </button>
+                    <button
+                      className="button secondary"
+                      onClick={() => propagateCurrentFrame("forward")}
+                      title="Copy this frame from the current frame onward"
+                    >
+                      Forward
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
           </section>
@@ -1027,6 +1633,12 @@ function App() {
         <section className="editor-pane">
           <div className="canvas-toolbar">
             <div className="toolbar-section">
+              <button className="small-icon" onClick={undoPaint} aria-label="Undo" disabled={!undoStack.length}>
+                <Undo size={15} />
+              </button>
+              <button className="small-icon" onClick={redoPaint} aria-label="Redo" disabled={!redoStack.length}>
+                <Redo size={15} />
+              </button>
               <span>Rotate</span>
               <button className="small-icon" aria-label="Rotate counterclockwise">
                 <RotateCcw size={15} />
@@ -1095,7 +1707,7 @@ function App() {
               </button>
             </div>
           </div>
-          <div className="canvas-frame">
+          <div className={`canvas-frame ${(tool === "hand" || isAltPressed) && editorZoom !== "fit" ? "pan-ready" : ""} ${isPanning ? "panning" : ""}`}>
             {!project && (
               <div className="drop-state">
                 <Photo size={38} />
@@ -1108,6 +1720,12 @@ function App() {
               onPointerMove={moveEdit}
               onPointerUp={finishEdit}
               onPointerCancel={finishEdit}
+              onWheel={handleCanvasWheel}
+              onContextMenu={(event) => {
+                if (tool === "hand") {
+                  event.preventDefault();
+                }
+              }}
             />
           </div>
         </section>
@@ -1354,6 +1972,12 @@ function App() {
           <span className="status-zoom">Zoom: {zoomLabel}</span>
         </footer>
       </section>
+      {dirtyPrompt && (
+        <DirtyPromptDialog
+          actionLabel={dirtyPrompt.actionLabel}
+          onChoose={resolveDirtyPrompt}
+        />
+      )}
     </main>
   );
 }
@@ -1381,8 +2005,393 @@ function ToolButton({
   );
 }
 
+function DirtyPromptDialog({
+  actionLabel,
+  onChoose,
+}: {
+  actionLabel: string;
+  onChoose: (choice: DirtyChoice) => void;
+}) {
+  return (
+    <div className="dialog-backdrop" role="presentation">
+      <div
+        className="dialog-panel"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="dirty-dialog-title"
+        aria-describedby="dirty-dialog-description"
+      >
+        <div>
+          <strong id="dirty-dialog-title">Save changes?</strong>
+          <p id="dirty-dialog-description">
+            Save this project before you {actionLabel}?
+          </p>
+        </div>
+        <div className="dialog-actions">
+          <button className="button ghost-button" onClick={() => onChoose("cancel")}>
+            Cancel
+          </button>
+          <button className="button ghost-button" onClick={() => onChoose("discard")}>
+            Discard
+          </button>
+          <button className="button play-button" onClick={() => onChoose("save")}>
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function effectiveLayerDataUrl(layer: Layer, frame: number) {
   return layer.frameEdits[frame] ?? layer.data_url;
+}
+
+function isDrawingTool(tool: unknown): tool is DrawingTool {
+  return tool === "pencil" || tool === "line" || tool === "erase";
+}
+
+function toolShortcut(key: string): Tool | null {
+  switch (key.toLowerCase()) {
+    case "b":
+      return "pencil";
+    case "l":
+      return "line";
+    case "e":
+      return "erase";
+    case "p":
+      return "picker";
+    case "h":
+      return "hand";
+    default:
+      return null;
+  }
+}
+
+function layerPaintSnapshot(layer: Layer): LayerPaintSnapshot {
+  return {
+    dataUrl: layer.data_url,
+    frameEdits: { ...layer.frameEdits },
+  };
+}
+
+function sameLayerPaintSnapshot(left: LayerPaintSnapshot, right: LayerPaintSnapshot) {
+  if (left.dataUrl !== right.dataUrl) {
+    return false;
+  }
+
+  const leftKeys = Object.keys(left.frameEdits);
+  const rightKeys = Object.keys(right.frameEdits);
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every((key) => left.frameEdits[key] === right.frameEdits[key])
+  );
+}
+
+function buildProjectDocument({
+  project,
+  renderOptions,
+  terminalSettings,
+  frameCount,
+  currentFrame,
+  playing,
+  selectedLayerId,
+  tool,
+  lastDrawingTool,
+  editorZoom,
+  panOffset,
+  brushSize,
+  brushColor,
+  frameOnly,
+  showCharacterGrid,
+  undoStack,
+  redoStack,
+}: {
+  project: Project | null;
+  renderOptions: RenderOptions;
+  terminalSettings: TerminalSettings;
+  frameCount: number;
+  currentFrame: number;
+  playing: boolean;
+  selectedLayerId: string | null;
+  tool: Tool;
+  lastDrawingTool: DrawingTool;
+  editorZoom: EditorZoom;
+  panOffset: Point;
+  brushSize: number;
+  brushColor: string;
+  frameOnly: boolean;
+  showCharacterGrid: boolean;
+  undoStack: PaintHistoryEntry[];
+  redoStack: PaintHistoryEntry[];
+}): ProjectDocumentV1 | null {
+  if (!project) {
+    return null;
+  }
+
+  return {
+    version: 1,
+    project,
+    renderOptions,
+    terminalSettings,
+    frameCount,
+    currentFrame,
+    playing,
+    selectedLayerId,
+    tool,
+    lastDrawingTool,
+    editorZoom,
+    panOffset,
+    brushSize,
+    brushColor,
+    frameOnly,
+    showCharacterGrid,
+    undoStack,
+    redoStack,
+  };
+}
+
+function serializeProjectDocument(document: ProjectDocumentV1) {
+  return JSON.stringify(normalizeProjectDocument(document), null, 2);
+}
+
+function projectDocumentFingerprintFor(document: ProjectDocumentV1) {
+  return JSON.stringify(normalizeProjectDocument(document));
+}
+
+function normalizeProjectDocument(document: ProjectDocumentV1): ProjectDocumentV1 {
+  return {
+    ...document,
+    project: {
+      ...document.project,
+      layers: document.project.layers.map((layer) => ({
+        ...layer,
+        frameEdits: sortStringRecord(layer.frameEdits),
+      })),
+    },
+    undoStack: document.undoStack.map(normalizePaintHistoryEntry),
+    redoStack: document.redoStack.map(normalizePaintHistoryEntry),
+  };
+}
+
+function normalizePaintHistoryEntry(entry: PaintHistoryEntry): PaintHistoryEntry {
+  return {
+    ...entry,
+    before: normalizeLayerPaintSnapshot(entry.before),
+    after: normalizeLayerPaintSnapshot(entry.after),
+  };
+}
+
+function normalizeLayerPaintSnapshot(snapshot: LayerPaintSnapshot): LayerPaintSnapshot {
+  return {
+    ...snapshot,
+    frameEdits: sortStringRecord(snapshot.frameEdits),
+  };
+}
+
+function sortStringRecord(record: Record<string, string>) {
+  return Object.fromEntries(Object.entries(record).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function parseProjectDocument(rawDocument: string): ProjectDocumentV1 {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawDocument);
+  } catch {
+    throw new Error("Project file is not valid JSON.");
+  }
+
+  if (!isProjectDocumentV1(parsed)) {
+    throw new Error("Project file is malformed or uses an unsupported version.");
+  }
+
+  return normalizeProjectDocument(parsed);
+}
+
+function restoreProjectDocument(
+  document: ProjectDocumentV1,
+  setters: {
+    setProject: React.Dispatch<React.SetStateAction<Project | null>>;
+    setRenderOptions: React.Dispatch<React.SetStateAction<RenderOptions>>;
+    setTerminalSettings: React.Dispatch<React.SetStateAction<TerminalSettings>>;
+    setFrameCount: React.Dispatch<React.SetStateAction<number>>;
+    setCurrentFrame: React.Dispatch<React.SetStateAction<number>>;
+    setPlaying: React.Dispatch<React.SetStateAction<boolean>>;
+    setSelectedLayerId: React.Dispatch<React.SetStateAction<string | null>>;
+    setTool: React.Dispatch<React.SetStateAction<Tool>>;
+    setLastDrawingTool: React.Dispatch<React.SetStateAction<DrawingTool>>;
+    setEditorZoom: React.Dispatch<React.SetStateAction<EditorZoom>>;
+    setPanOffset: React.Dispatch<React.SetStateAction<Point>>;
+    setBrushSize: React.Dispatch<React.SetStateAction<number>>;
+    setBrushColor: React.Dispatch<React.SetStateAction<string>>;
+    setFrameOnly: React.Dispatch<React.SetStateAction<boolean>>;
+    setShowCharacterGrid: React.Dispatch<React.SetStateAction<boolean>>;
+    setUndoStack: React.Dispatch<React.SetStateAction<PaintHistoryEntry[]>>;
+    setRedoStack: React.Dispatch<React.SetStateAction<PaintHistoryEntry[]>>;
+  },
+) {
+  setters.setProject(document.project);
+  setters.setRenderOptions(document.renderOptions);
+  setters.setTerminalSettings(document.terminalSettings);
+  setters.setFrameCount(document.frameCount);
+  setters.setCurrentFrame(document.currentFrame);
+  setters.setPlaying(document.playing);
+  setters.setSelectedLayerId(document.selectedLayerId);
+  setters.setTool(document.tool);
+  setters.setLastDrawingTool(document.lastDrawingTool);
+  setters.setEditorZoom(document.editorZoom);
+  setters.setPanOffset(document.panOffset);
+  setters.setBrushSize(document.brushSize);
+  setters.setBrushColor(document.brushColor);
+  setters.setFrameOnly(document.frameOnly);
+  setters.setShowCharacterGrid(document.showCharacterGrid);
+  setters.setUndoStack(document.undoStack);
+  setters.setRedoStack(document.redoStack);
+}
+
+function isProjectDocumentV1(value: unknown): value is ProjectDocumentV1 {
+  if (!isRecord(value) || value.version !== 1) {
+    return false;
+  }
+
+  return (
+    isProject(value.project) &&
+    isRenderOptions(value.renderOptions) &&
+    isTerminalSettings(value.terminalSettings) &&
+    isFiniteNumber(value.frameCount) &&
+    value.frameCount >= 1 &&
+    isFiniteNumber(value.currentFrame) &&
+    value.currentFrame >= 0 &&
+    typeof value.playing === "boolean" &&
+    (value.selectedLayerId === null || typeof value.selectedLayerId === "string") &&
+    isTool(value.tool) &&
+    isDrawingTool(value.lastDrawingTool) &&
+    isEditorZoom(value.editorZoom) &&
+    isPoint(value.panOffset) &&
+    isFiniteNumber(value.brushSize) &&
+    typeof value.brushColor === "string" &&
+    typeof value.frameOnly === "boolean" &&
+    typeof value.showCharacterGrid === "boolean" &&
+    Array.isArray(value.undoStack) &&
+    value.undoStack.every(isPaintHistoryEntry) &&
+    Array.isArray(value.redoStack) &&
+    value.redoStack.every(isPaintHistoryEntry)
+  );
+}
+
+function isProject(value: unknown): value is Project {
+  return (
+    isRecord(value) &&
+    isFiniteNumber(value.width) &&
+    value.width >= 1 &&
+    isFiniteNumber(value.height) &&
+    value.height >= 1 &&
+    Array.isArray(value.layers) &&
+    value.layers.every(isLayer) &&
+    Array.isArray(value.suggestedEffects) &&
+    value.suggestedEffects.every(isEffectSuggestion)
+  );
+}
+
+function isLayer(value: unknown): value is Layer {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.name === "string" &&
+    typeof value.data_url === "string" &&
+    typeof value.visible === "boolean" &&
+    isFiniteNumber(value.opacity) &&
+    isLayerEffect(value.effect) &&
+    isStringRecord(value.frameEdits)
+  );
+}
+
+function isEffectSuggestion(value: unknown): value is EffectSuggestion {
+  return isRecord(value) && typeof value.name === "string" && typeof value.description === "string";
+}
+
+function isLayerEffect(value: unknown): value is LayerEffect {
+  return (
+    isRecord(value) &&
+    (value.kind === "none" || value.kind === "rotate") &&
+    isFiniteNumber(value.degrees_per_frame)
+  );
+}
+
+function isRenderOptions(value: unknown): value is RenderOptions {
+  return (
+    isRecord(value) &&
+    isFiniteNumber(value.width) &&
+    isFiniteNumber(value.threshold) &&
+    typeof value.invert === "boolean" &&
+    isFiniteNumber(value.alpha_cutoff) &&
+    (value.glyph_mode === "braille" || value.glyph_mode === "solid") &&
+    (value.color_mode === "ansi" || value.color_mode === "monochrome")
+  );
+}
+
+function isTerminalSettings(value: unknown): value is TerminalSettings {
+  return (
+    isRecord(value) &&
+    typeof value.fontFamily === "string" &&
+    terminalFonts.includes(value.fontFamily as TerminalFont) &&
+    typeof value.customFont === "string" &&
+    isFiniteNumber(value.fontSize) &&
+    isFiniteNumber(value.lineHeight) &&
+    typeof value.background === "string"
+  );
+}
+
+function isPaintHistoryEntry(value: unknown): value is PaintHistoryEntry {
+  return (
+    isRecord(value) &&
+    typeof value.layerId === "string" &&
+    isLayerPaintSnapshot(value.before) &&
+    isLayerPaintSnapshot(value.after)
+  );
+}
+
+function isLayerPaintSnapshot(value: unknown): value is LayerPaintSnapshot {
+  return isRecord(value) && typeof value.dataUrl === "string" && isStringRecord(value.frameEdits);
+}
+
+function isTool(value: unknown): value is Tool {
+  return value === "pencil" || value === "line" || value === "erase" || value === "picker" || value === "hand";
+}
+
+function isEditorZoom(value: unknown): value is EditorZoom {
+  return value === "fit" || value === 2 || value === 4 || value === 8;
+}
+
+function isPoint(value: unknown): value is Point {
+  return isRecord(value) && isFiniteNumber(value.x) && isFiniteNumber(value.y);
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.values(value).every((entry) => typeof entry === "string");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function ensureBloomdotExtension(path: string) {
+  return path.toLowerCase().endsWith(bloomdotExtension) ? path : `${path}${bloomdotExtension}`;
+}
+
+function fileNameFromPath(path: string) {
+  const fileName = path.split(/[\\/]/).at(-1) ?? path;
+  return fileName.endsWith(bloomdotExtension)
+    ? fileName.slice(0, -bloomdotExtension.length)
+    : fileName;
+}
+
+function isTauriEnvironment() {
+  return "__TAURI_INTERNALS__" in window;
 }
 
 function toTerminalFrame(frame: string) {

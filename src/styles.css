@@ -84,6 +84,28 @@ button {
   line-height: 1;
 }
 
+.document-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  max-width: 120px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dirty-indicator {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--accent-2);
+}
+
 .topbar-actions {
   display: flex;
   align-items: center;
@@ -188,6 +210,44 @@ button {
 
 .fps-control span {
   color: var(--ink);
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(5, 8, 7, 0.58);
+}
+
+.dialog-panel {
+  display: grid;
+  gap: 18px;
+  width: min(420px, 100%);
+  padding: 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.dialog-panel strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 16px;
+}
+
+.dialog-panel p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .workspace {
@@ -471,6 +531,27 @@ button {
   accent-color: var(--accent);
 }
 
+.frame-propagation {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.frame-propagation-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.frame-propagation-actions .button {
+  width: 100%;
+  min-width: 0;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
 .editor-pane {
   grid-column: 3;
   grid-row: 1;
@@ -537,6 +618,14 @@ button {
   width: 100%;
   height: 100%;
   cursor: crosshair;
+}
+
+.canvas-frame.pan-ready canvas {
+  cursor: grab;
+}
+
+.canvas-frame.panning canvas {
+  cursor: grabbing;
 }
 
 .drop-state {
@@ -863,7 +952,14 @@ button {
   gap: 8px;
   min-width: 0;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
   padding-bottom: 2px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.frame-strip::-webkit-scrollbar {
+  display: none;
 }
 
 .frame-chip {
