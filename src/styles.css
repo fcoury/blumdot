@@ -115,6 +115,7 @@ button {
 
 .primary-actions {
   justify-content: flex-start;
+  container-type: inline-size;
 }
 
 .transport-actions {
@@ -143,6 +144,7 @@ button {
   background: var(--panel-2);
   cursor: pointer;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .button:hover:not(:disabled),
@@ -210,6 +212,41 @@ button {
 
 .fps-control span {
   color: var(--ink);
+}
+
+@container (max-width: 460px) {
+  .primary-actions .button {
+    width: 34px;
+    padding: 0;
+  }
+
+  .primary-actions .responsive-label {
+    display: none;
+  }
+}
+
+@media (max-width: 1320px) {
+  .topbar {
+    grid-template-columns: minmax(180px, 220px) minmax(190px, 1fr) auto minmax(150px, 1fr);
+    gap: 10px;
+  }
+
+  .brand {
+    gap: 8px;
+  }
+
+  .document-label {
+    max-width: 88px;
+  }
+
+  .export-actions .button:not(.icon-button) {
+    width: 34px;
+    padding: 0;
+  }
+
+  .export-actions .responsive-label {
+    display: none;
+  }
 }
 
 .dialog-backdrop {
@@ -622,6 +659,10 @@ button {
 
 .canvas-frame.pan-ready canvas {
   cursor: grab;
+}
+
+.canvas-frame.clone-armed canvas {
+  cursor: copy;
 }
 
 .canvas-frame.panning canvas {

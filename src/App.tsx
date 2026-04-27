@@ -25,6 +25,7 @@ import {
   IconRefresh as RefreshCw,
   IconRotate2 as RotateCcw,
   IconRotateClockwise as RotateCw,
+  IconRubberStamp as Stamp,
   IconSettings as Settings,
   IconTrash as Trash2,
   IconArrowBackUp as Undo,
@@ -41,7 +42,7 @@ import { Terminal, useTerminal } from "@wterm/react";
 import "@wterm/react/css";
 import sampleCloudUrl from "../assets/codex-color.png";
 
-type DrawingTool = "pencil" | "line" | "erase";
+type DrawingTool = "pencil" | "line" | "erase" | "clone";
 type Tool = DrawingTool | "picker" | "hand";
 type EffectKind = "none" | "rotate";
 type EditorZoom = "fit" | 2 | 4 | 8;
@@ -122,6 +123,7 @@ type WorkingEdit = {
   frame: number;
   frameOnly: boolean;
   before: LayerPaintSnapshot;
+  clone?: CloneStroke;
 };
 
 type WorkingPan = {
@@ -133,6 +135,11 @@ type WorkingPan = {
 type LayerPaintSnapshot = {
   dataUrl: string;
   frameEdits: Record<string, string>;
+};
+
+type CloneStroke = {
+  sourceCanvas: HTMLCanvasElement;
+  offset: Point;
 };
 
 type PaintHistoryEntry = {
@@ -158,6 +165,8 @@ type ProjectDocumentV1 = {
   panOffset: Point;
   brushSize: number;
   brushColor: string;
+  cloneSource?: Point | null;
+  cloneOffset?: Point | null;
   frameOnly: boolean;
   showCharacterGrid: boolean;
   undoStack: PaintHistoryEntry[];
@@ -237,6 +246,8 @@ function App() {
   const [lastDrawingTool, setLastDrawingTool] = useState<DrawingTool>("pencil");
   const [brushSize, setBrushSize] = useState(14);
   const [brushColor, setBrushColor] = useState("#ffffff");
+  const [cloneSource, setCloneSource] = useState<Point | null>(null);
+  const [cloneOffset, setCloneOffset] = useState<Point | null>(null);
   const [terminalSettings, setTerminalSettings] = useState(defaultTerminalSettings);
   const [fontSizeDraft, setFontSizeDraft] = useState(String(defaultTerminalSettings.fontSize));
   const [showTerminalSettings, setShowTerminalSettings] = useState(false);
@@ -328,6 +339,8 @@ function App() {
         panOffset,
         brushSize,
         brushColor,
+        cloneSource,
+        cloneOffset,
         frameOnly,
         showCharacterGrid,
         undoStack,
@@ -336,6 +349,8 @@ function App() {
     [
       brushColor,
       brushSize,
+      cloneOffset,
+      cloneSource,
       currentFrame,
       editorZoom,
       frameCount,
@@ -422,6 +437,8 @@ function App() {
         setUndoStack([]);
         setRedoStack([]);
         setPanOffset({ x: 0, y: 0 });
+        setCloneSource(null);
+        setCloneOffset(null);
         setDocumentPath(null);
         setDocumentName(null);
         savedDocumentFingerprintRef.current = null;
@@ -549,6 +566,8 @@ function App() {
         setPanOffset,
         setBrushSize,
         setBrushColor,
+        setCloneSource,
+        setCloneOffset,
         setFrameOnly,
         setShowCharacterGrid,
         setUndoStack,
@@ -644,6 +663,18 @@ function App() {
         paintCharacterGrid(context, viewport, renderLayout);
       }
 
+      if (tool === "clone" && cloneSource) {
+        const activeClone = workingEditRef.current;
+        const markerPoint =
+          activeClone?.tool === "clone" && activeClone.clone
+            ? {
+                x: activeClone.last.x - activeClone.clone.offset.x,
+                y: activeClone.last.y - activeClone.clone.offset.y,
+              }
+            : cloneSource;
+        paintCloneSourceMarker(context, viewport, markerPoint, activeClone?.tool === "clone");
+      }
+
       context.strokeStyle = selectedLayer ? "#43d6d3" : "rgba(255, 255, 255, 0.16)";
       context.lineWidth = selectedLayer ? 2 : 1;
       context.strokeRect(viewport.x - 0.5, viewport.y - 0.5, viewport.width + 1, viewport.height + 1);
@@ -653,12 +684,14 @@ function App() {
       brushSize,
       currentFrame,
       editorZoom,
+      cloneSource,
       panOffset,
       project,
       renderLayout,
       selectedLayer,
       selectedLayerId,
       showCharacterGrid,
+      tool,
     ],
   );
 
@@ -894,7 +927,7 @@ function App() {
 
   const startEdit = useCallback(
     async (event: React.PointerEvent<HTMLCanvasElement>) => {
-      if (tool === "hand" || event.altKey || event.button === 1) {
+      if (tool === "hand" || (event.altKey && tool !== "clone") || event.button === 1) {
         startPan(event);
         return;
       }
@@ -922,6 +955,17 @@ function App() {
         return;
       }
 
+      if (tool === "clone" && event.altKey) {
+        setCloneSource(point);
+        setCloneOffset(null);
+        requestEditorDraw();
+        return;
+      }
+
+      if (tool === "clone" && !cloneSource) {
+        return;
+      }
+
       const editingLayer = selectedLayer;
       if (!editingLayer) {
         return;
@@ -938,6 +982,19 @@ function App() {
 
       const image = await loadCachedImage(effectiveLayerDataUrl(editingLayer, currentFrame), imageCacheRef.current);
       context.drawImage(image, 0, 0);
+      const clone =
+        tool === "clone" && cloneSource
+          ? {
+              sourceCanvas: imageToCanvas(image, project.width, project.height),
+              offset: cloneOffset ?? {
+                x: point.x - cloneSource.x,
+                y: point.y - cloneSource.y,
+              },
+            }
+          : undefined;
+      if (clone && !cloneOffset) {
+        setCloneOffset(clone.offset);
+      }
       workingEditRef.current = {
         canvas: editCanvas,
         start: point,
@@ -947,9 +1004,12 @@ function App() {
         frame: currentFrame,
         frameOnly,
         before: layerPaintSnapshot(editingLayer),
+        clone,
       };
 
-      if (tool !== "line") {
+      if (tool === "clone" && clone) {
+        paintCloneStroke(context, clone.sourceCanvas, point, point, clone.offset, brushSize);
+      } else if (tool !== "line") {
         paintStroke(context, point, point, tool, brushColor, brushSize);
       }
       requestEditorDraw(editCanvas);
@@ -957,6 +1017,8 @@ function App() {
     [
       brushColor,
       brushSize,
+      cloneOffset,
+      cloneSource,
       currentFrame,
       frameOnly,
       lastDrawingTool,
@@ -999,7 +1061,11 @@ function App() {
       if (!context) {
         return;
       }
-      paintStroke(context, edit.last, point, edit.tool, brushColor, brushSize);
+      if (edit.tool === "clone" && edit.clone) {
+        paintCloneStroke(context, edit.clone.sourceCanvas, edit.last, point, edit.clone.offset, brushSize);
+      } else {
+        paintStroke(context, edit.last, point, edit.tool, brushColor, brushSize);
+      }
       edit.last = point;
       requestEditorDraw(edit.canvas);
     },
@@ -1341,21 +1407,45 @@ function App() {
           </span>
         </div>
         <div className="topbar-actions primary-actions">
-          <button className="button" onClick={() => void openProject()} disabled={isImporting || isSaving}>
+          <button
+            className="button"
+            onClick={() => void openProject()}
+            disabled={isImporting || isSaving}
+            aria-label="Open project"
+            title="Open project"
+          >
             <FolderOpen size={16} />
-            Open Project
+            <span className="responsive-label">Open Project</span>
           </button>
-          <button className="button" onClick={() => void saveProject()} disabled={!project || isSaving}>
+          <button
+            className="button"
+            onClick={() => void saveProject()}
+            disabled={!project || isSaving}
+            aria-label="Save"
+            title="Save"
+          >
             <SaveIcon size={16} />
-            Save
+            <span className="responsive-label">Save</span>
           </button>
-          <button className="button ghost-button" onClick={() => void saveProject(true)} disabled={!project || isSaving}>
+          <button
+            className="button ghost-button"
+            onClick={() => void saveProject(true)}
+            disabled={!project || isSaving}
+            aria-label="Save as"
+            title="Save as"
+          >
             <SaveIcon size={16} />
-            Save As
+            <span className="responsive-label">Save As</span>
           </button>
-          <button className="button" onClick={() => fileInputRef.current?.click()} disabled={isImporting || isSaving}>
+          <button
+            className="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isImporting || isSaving}
+            aria-label="Import image"
+            title="Import image"
+          >
             <FolderOpen size={16} />
-            Import
+            <span className="responsive-label">Import</span>
           </button>
           <button
             className="button ghost-button"
@@ -1367,9 +1457,11 @@ function App() {
               })();
             }}
             disabled={isImporting || isSaving}
+            aria-label="Load sample"
+            title="Load sample"
           >
             <FileImage size={16} />
-            Sample
+            <span className="responsive-label">Sample</span>
           </button>
         </div>
         <div className="topbar-actions transport-actions">
@@ -1393,13 +1485,19 @@ function App() {
           </div>
         </div>
         <div className="topbar-actions export-actions">
-          <button className="button">
+          <button className="button" aria-label="Effects" title="Effects">
             <RotateCw size={16} />
-            Effects
+            <span className="responsive-label">Effects</span>
           </button>
-          <button className="button" onClick={exportAnsi} disabled={!frames.length}>
+          <button
+            className="button"
+            onClick={exportAnsi}
+            disabled={!frames.length}
+            aria-label="Export"
+            title="Export"
+          >
             <Download size={16} />
-            Export
+            <span className="responsive-label">Export</span>
           </button>
           <button className="button icon-button" aria-label="Settings">
             <Settings size={17} />
@@ -1435,6 +1533,9 @@ function App() {
             </ToolButton>
             <ToolButton active={tool === "erase"} label="Erase" onClick={() => selectTool("erase")}>
               <Eraser size={20} />
+            </ToolButton>
+            <ToolButton active={tool === "clone"} label="Clone stamp" onClick={() => selectTool("clone")}>
+              <Stamp size={20} />
             </ToolButton>
             <ToolButton active={tool === "picker"} label="Pick color" onClick={() => selectTool("picker")}>
               <ColorPicker size={20} />
@@ -1707,7 +1808,7 @@ function App() {
               </button>
             </div>
           </div>
-          <div className={`canvas-frame ${(tool === "hand" || isAltPressed) && editorZoom !== "fit" ? "pan-ready" : ""} ${isPanning ? "panning" : ""}`}>
+          <div className={`canvas-frame ${(tool === "hand" || (isAltPressed && tool !== "clone")) && editorZoom !== "fit" ? "pan-ready" : ""} ${isPanning ? "panning" : ""} ${tool === "clone" && cloneSource ? "clone-armed" : ""}`}>
             {!project && (
               <div className="drop-state">
                 <Photo size={38} />
@@ -2048,7 +2149,7 @@ function effectiveLayerDataUrl(layer: Layer, frame: number) {
 }
 
 function isDrawingTool(tool: unknown): tool is DrawingTool {
-  return tool === "pencil" || tool === "line" || tool === "erase";
+  return tool === "pencil" || tool === "line" || tool === "erase" || tool === "clone";
 }
 
 function toolShortcut(key: string): Tool | null {
@@ -2059,6 +2160,8 @@ function toolShortcut(key: string): Tool | null {
       return "line";
     case "e":
       return "erase";
+    case "s":
+      return "clone";
     case "p":
       return "picker";
     case "h":
@@ -2102,6 +2205,8 @@ function buildProjectDocument({
   panOffset,
   brushSize,
   brushColor,
+  cloneSource,
+  cloneOffset,
   frameOnly,
   showCharacterGrid,
   undoStack,
@@ -2120,6 +2225,8 @@ function buildProjectDocument({
   panOffset: Point;
   brushSize: number;
   brushColor: string;
+  cloneSource: Point | null;
+  cloneOffset: Point | null;
   frameOnly: boolean;
   showCharacterGrid: boolean;
   undoStack: PaintHistoryEntry[];
@@ -2144,6 +2251,8 @@ function buildProjectDocument({
     panOffset,
     brushSize,
     brushColor,
+    cloneSource,
+    cloneOffset,
     frameOnly,
     showCharacterGrid,
     undoStack,
@@ -2162,6 +2271,8 @@ function projectDocumentFingerprintFor(document: ProjectDocumentV1) {
 function normalizeProjectDocument(document: ProjectDocumentV1): ProjectDocumentV1 {
   return {
     ...document,
+    cloneSource: document.cloneSource ?? null,
+    cloneOffset: document.cloneOffset ?? null,
     project: {
       ...document.project,
       layers: document.project.layers.map((layer) => ({
@@ -2224,6 +2335,8 @@ function restoreProjectDocument(
     setPanOffset: React.Dispatch<React.SetStateAction<Point>>;
     setBrushSize: React.Dispatch<React.SetStateAction<number>>;
     setBrushColor: React.Dispatch<React.SetStateAction<string>>;
+    setCloneSource: React.Dispatch<React.SetStateAction<Point | null>>;
+    setCloneOffset: React.Dispatch<React.SetStateAction<Point | null>>;
     setFrameOnly: React.Dispatch<React.SetStateAction<boolean>>;
     setShowCharacterGrid: React.Dispatch<React.SetStateAction<boolean>>;
     setUndoStack: React.Dispatch<React.SetStateAction<PaintHistoryEntry[]>>;
@@ -2243,6 +2356,8 @@ function restoreProjectDocument(
   setters.setPanOffset(document.panOffset);
   setters.setBrushSize(document.brushSize);
   setters.setBrushColor(document.brushColor);
+  setters.setCloneSource(document.cloneSource ?? null);
+  setters.setCloneOffset(document.cloneOffset ?? null);
   setters.setFrameOnly(document.frameOnly);
   setters.setShowCharacterGrid(document.showCharacterGrid);
   setters.setUndoStack(document.undoStack);
@@ -2270,6 +2385,8 @@ function isProjectDocumentV1(value: unknown): value is ProjectDocumentV1 {
     isPoint(value.panOffset) &&
     isFiniteNumber(value.brushSize) &&
     typeof value.brushColor === "string" &&
+    (value.cloneSource === undefined || value.cloneSource === null || isPoint(value.cloneSource)) &&
+    (value.cloneOffset === undefined || value.cloneOffset === null || isPoint(value.cloneOffset)) &&
     typeof value.frameOnly === "boolean" &&
     typeof value.showCharacterGrid === "boolean" &&
     Array.isArray(value.undoStack) &&
@@ -2356,7 +2473,14 @@ function isLayerPaintSnapshot(value: unknown): value is LayerPaintSnapshot {
 }
 
 function isTool(value: unknown): value is Tool {
-  return value === "pencil" || value === "line" || value === "erase" || value === "picker" || value === "hand";
+  return (
+    value === "pencil" ||
+    value === "line" ||
+    value === "erase" ||
+    value === "clone" ||
+    value === "picker" ||
+    value === "hand"
+  );
 }
 
 function isEditorZoom(value: unknown): value is EditorZoom {
@@ -2545,6 +2669,38 @@ function paintCharacterGrid(
   context.restore();
 }
 
+function paintCloneSourceMarker(
+  context: CanvasRenderingContext2D,
+  viewport: Viewport,
+  point: Point,
+  active: boolean,
+) {
+  const x = viewport.x + point.x * viewport.scale;
+  const y = viewport.y + point.y * viewport.scale;
+
+  context.save();
+  context.strokeStyle = "#ffb020";
+  context.lineWidth = active ? 2 : 1.5;
+  context.beginPath();
+  context.arc(x, y, active ? 9 : 8, 0, Math.PI * 2);
+  context.moveTo(x - 12, y);
+  context.lineTo(x - 4, y);
+  context.moveTo(x + 4, y);
+  context.lineTo(x + 12, y);
+  context.moveTo(x, y - 12);
+  context.lineTo(x, y - 4);
+  context.moveTo(x, y + 4);
+  context.lineTo(x, y + 12);
+  context.stroke();
+  if (active) {
+    context.fillStyle = "rgba(255, 176, 32, 0.18)";
+    context.beginPath();
+    context.arc(x, y, 6, 0, Math.PI * 2);
+    context.fill();
+  }
+  context.restore();
+}
+
 function drawLayerAsDots(
   context: CanvasRenderingContext2D,
   source: CanvasImageSource,
@@ -2618,6 +2774,77 @@ function paintStroke(
     context.fill();
   }
   context.restore();
+}
+
+function paintCloneStroke(
+  context: CanvasRenderingContext2D,
+  sourceCanvas: HTMLCanvasElement,
+  from: Point,
+  to: Point,
+  offset: Point,
+  size: number,
+) {
+  const distance = Math.hypot(to.x - from.x, to.y - from.y);
+  const step = Math.max(1, size / 4);
+  const steps = Math.max(1, Math.ceil(distance / step));
+
+  for (let index = 0; index <= steps; index += 1) {
+    const progress = steps === 0 ? 0 : index / steps;
+    stampClone(
+      context,
+      sourceCanvas,
+      {
+        x: from.x + (to.x - from.x) * progress,
+        y: from.y + (to.y - from.y) * progress,
+      },
+      offset,
+      size,
+    );
+  }
+}
+
+function stampClone(
+  context: CanvasRenderingContext2D,
+  sourceCanvas: HTMLCanvasElement,
+  destination: Point,
+  offset: Point,
+  size: number,
+) {
+  const radius = size / 2;
+  const source = {
+    x: destination.x - offset.x,
+    y: destination.y - offset.y,
+  };
+  const sourceLeft = source.x - radius;
+  const sourceTop = source.y - radius;
+  const sourceRight = source.x + radius;
+  const sourceBottom = source.y + radius;
+  if (
+    sourceRight <= 0 ||
+    sourceBottom <= 0 ||
+    sourceLeft >= sourceCanvas.width ||
+    sourceTop >= sourceCanvas.height
+  ) {
+    return;
+  }
+
+  context.save();
+  context.beginPath();
+  context.arc(destination.x, destination.y, radius, 0, Math.PI * 2);
+  context.clip();
+  context.drawImage(sourceCanvas, destination.x - source.x, destination.y - source.y);
+  context.restore();
+}
+
+function imageToCanvas(image: CanvasImageSource, width: number, height: number) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (context) {
+    context.drawImage(image, 0, 0);
+  }
+  return canvas;
 }
 
 function loadImage(src: string): Promise<HTMLImageElement> {

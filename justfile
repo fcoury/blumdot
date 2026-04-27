@@ -4,6 +4,7 @@ app := "src-tauri/target/debug/bundle/macos/Blumdot.app"
 
 alias c := dev
 alias i := install
+alias app := dev
 
 install:
     npm install
@@ -35,6 +36,9 @@ open:
 
 raw:
     npm run desktop:raw
+
+web:
+    npm run dev
 
 dev:
     npm run tauri dev
