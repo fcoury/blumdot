@@ -53,6 +53,7 @@ type RenderOptions = {
   invert: boolean;
   alpha_cutoff: number;
   glyph_mode: "braille" | "solid";
+  color_mode: "ansi" | "monochrome";
 };
 
 type LayerEffect = {
@@ -137,6 +138,7 @@ const defaultRenderOptions: RenderOptions = {
   invert: false,
   alpha_cutoff: 16,
   glyph_mode: "braille",
+  color_mode: "ansi",
 };
 
 const minOutputWidth = 10;
@@ -1117,15 +1119,17 @@ function App() {
           </div>
           <div
             ref={terminalWrapRef}
-            className="terminal-wrap"
+            className={`terminal-wrap ${renderOptions.color_mode === "monochrome" ? "monochrome" : ""}`}
             style={terminalStyle}
           >
-            <div className="terminal-titlebar">
-              <span className="traffic red" />
-              <span className="traffic yellow" />
-              <span className="traffic green" />
-              <span>blumdot preview</span>
-            </div>
+            {renderOptions.color_mode === "ansi" && (
+              <div className="terminal-titlebar">
+                <span className="traffic red" />
+                <span className="traffic yellow" />
+                <span className="traffic green" />
+                <span>blumdot preview</span>
+              </div>
+            )}
             <Terminal
               key={terminalTypographyKey}
               ref={terminalRef}
@@ -1196,6 +1200,27 @@ function App() {
                 </button>
               </div>
               <div className="terminal-settings-grid">
+                <div className="terminal-field terminal-mode-field">
+                  <span>Render</span>
+                  <div className="segmented-control" aria-label="Render mode">
+                    <button
+                      type="button"
+                      className={renderOptions.color_mode === "ansi" ? "active" : ""}
+                      onClick={() => setRenderOptions((current) => ({ ...current, color_mode: "ansi" }))}
+                      aria-pressed={renderOptions.color_mode === "ansi"}
+                    >
+                      Color
+                    </button>
+                    <button
+                      type="button"
+                      className={renderOptions.color_mode === "monochrome" ? "active" : ""}
+                      onClick={() => setRenderOptions((current) => ({ ...current, color_mode: "monochrome" }))}
+                      aria-pressed={renderOptions.color_mode === "monochrome"}
+                    >
+                      Mono
+                    </button>
+                  </div>
+                </div>
                 <label className="terminal-field terminal-font-field">
                   <span>Font</span>
                   <select

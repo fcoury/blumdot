@@ -2,7 +2,8 @@
 
 use base64::{Engine as _, engine::general_purpose};
 use blumdot::{
-    GlyphMode, RenderOptions, decode_image_bytes, extract_layers, render_image_ansi,
+    GlyphMode, RenderOptions, decode_image_bytes, extract_layers, render_image,
+    render_image_ansi,
     render_layout_for_dimensions, rotate_image_in_canvas,
 };
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
@@ -26,6 +27,7 @@ struct GuiRenderOptions {
     invert: bool,
     alpha_cutoff: u8,
     glyph_mode: String,
+    color_mode: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -176,6 +178,7 @@ async fn render_preview_frames(request: PreviewRequest) -> Result<Vec<String>, S
 }
 
 fn render_preview_frames_blocking(request: PreviewRequest) -> Result<Vec<String>, String> {
+    let monochrome = request.options.color_mode == "monochrome";
     let options = request.options.into_render_options();
     let frame_count = request.frame_count.clamp(1, MAX_FRAME_COUNT);
     let width = request.width.max(1);
@@ -209,7 +212,12 @@ fn render_preview_frames_blocking(request: PreviewRequest) -> Result<Vec<String>
             composite_layer(&mut canvas, &transformed, layer.opacity);
         }
 
-        frames.push(render_image_ansi(&DynamicImage::ImageRgba8(canvas), options));
+        let frame = if monochrome {
+            render_image(&DynamicImage::ImageRgba8(canvas), options)
+        } else {
+            render_image_ansi(&DynamicImage::ImageRgba8(canvas), options)
+        };
+        frames.push(frame);
     }
 
     Ok(frames)

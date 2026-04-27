@@ -585,6 +585,12 @@ button {
   background: var(--preview-bg);
 }
 
+.terminal-wrap.monochrome {
+  grid-template-rows: minmax(0, 1fr);
+  border: 0;
+  border-radius: 0;
+}
+
 .terminal-titlebar {
   display: flex;
   align-items: center;
@@ -628,6 +634,10 @@ button {
   border-radius: 0 0 7px 7px;
   box-shadow: none;
   letter-spacing: 0;
+}
+
+.terminal-wrap.monochrome .preview-terminal {
+  border-radius: 0;
 }
 
 .preview-terminal.theme-monokai {
@@ -719,9 +729,38 @@ button {
 }
 
 .terminal-custom-font-field,
+.terminal-mode-field,
 .terminal-range-field,
 .terminal-color-field {
   grid-column: 1 / -1;
+}
+
+.segmented-control {
+  display: inline-grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 2px;
+  width: max-content;
+  padding: 2px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: #121615;
+}
+
+.segmented-control button {
+  height: 25px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.segmented-control button.active {
+  color: #06100f;
+  background: var(--accent);
 }
 
 .terminal-settings-panel input[type="color"] {
