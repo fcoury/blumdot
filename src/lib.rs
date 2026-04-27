@@ -64,6 +64,14 @@ impl Default for RenderOptions {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RenderLayout {
+    pub columns: u32,
+    pub rows: u32,
+    pub sample_width: u32,
+    pub sample_height: u32,
+}
+
 impl RenderOptions {
     pub fn with_width(mut self, width: u32) -> Self {
         self.width = width;
@@ -347,24 +355,50 @@ pub fn render_image_visible(image: &DynamicImage, options: RenderOptions) -> Str
     render_image_visible_with_layout(image, options, layout_width, layout_height)
 }
 
+pub fn render_layout(image: &DynamicImage, options: RenderOptions) -> RenderLayout {
+    let (layout_width, layout_height) = image.dimensions();
+    render_layout_for_dimensions(layout_width, layout_height, options)
+}
+
+pub fn render_layout_for_dimensions(
+    layout_width: u32,
+    layout_height: u32,
+    options: RenderOptions,
+) -> RenderLayout {
+    let columns = options.width.max(1);
+    let aspect = layout_height as f32 / layout_width.max(1) as f32;
+    let base_rows = ((columns as f32 * aspect * CELL_ASPECT_RATIO).round() as u32).max(1);
+
+    match options.glyph_mode {
+        GlyphMode::Braille => RenderLayout {
+            columns,
+            rows: base_rows,
+            sample_width: columns * 2,
+            sample_height: base_rows * 4,
+        },
+        GlyphMode::Solid => RenderLayout {
+            columns,
+            rows: base_rows * 2,
+            sample_width: columns * 2,
+            sample_height: base_rows * 4,
+        },
+    }
+}
+
 fn render_image_with_layout(
     image: &DynamicImage,
     options: RenderOptions,
     layout_width: u32,
     layout_height: u32,
 ) -> String {
-    let columns = options.width.max(1);
-    let aspect = layout_height as f32 / layout_width.max(1) as f32;
-    let rows = ((columns as f32 * aspect * CELL_ASPECT_RATIO).round() as u32).max(1);
-    let sample_width = columns * 2;
-    let sample_height = rows * 4;
+    let layout = render_layout_for_dimensions(layout_width, layout_height, options);
     let resized = image
-        .resize_exact(sample_width, sample_height, FilterType::Triangle)
+        .resize_exact(layout.sample_width, layout.sample_height, FilterType::Triangle)
         .to_rgba8();
 
     match options.glyph_mode {
-        GlyphMode::Braille => render_braille_grid(&resized, columns, rows, options),
-        GlyphMode::Solid => render_solid_grid(&resized, columns, rows * 2, options),
+        GlyphMode::Braille => render_braille_grid(&resized, layout.columns, layout.rows, options),
+        GlyphMode::Solid => render_solid_grid(&resized, layout.columns, layout.rows, options),
     }
 }
 
@@ -374,18 +408,14 @@ fn render_image_ansi_with_layout(
     layout_width: u32,
     layout_height: u32,
 ) -> String {
-    let columns = options.width.max(1);
-    let aspect = layout_height as f32 / layout_width.max(1) as f32;
-    let rows = ((columns as f32 * aspect * CELL_ASPECT_RATIO).round() as u32).max(1);
-    let sample_width = columns * 2;
-    let sample_height = rows * 4;
+    let layout = render_layout_for_dimensions(layout_width, layout_height, options);
     let resized = image
-        .resize_exact(sample_width, sample_height, FilterType::Triangle)
+        .resize_exact(layout.sample_width, layout.sample_height, FilterType::Triangle)
         .to_rgba8();
 
     match options.glyph_mode {
-        GlyphMode::Braille => render_braille_grid_ansi(&resized, columns, rows, options),
-        GlyphMode::Solid => render_solid_grid_ansi(&resized, columns, rows * 2, options),
+        GlyphMode::Braille => render_braille_grid_ansi(&resized, layout.columns, layout.rows, options),
+        GlyphMode::Solid => render_solid_grid_ansi(&resized, layout.columns, layout.rows, options),
     }
 }
 
@@ -395,18 +425,14 @@ fn render_image_visible_with_layout(
     layout_width: u32,
     layout_height: u32,
 ) -> String {
-    let columns = options.width.max(1);
-    let aspect = layout_height as f32 / layout_width.max(1) as f32;
-    let rows = ((columns as f32 * aspect * CELL_ASPECT_RATIO).round() as u32).max(1);
-    let sample_width = columns * 2;
-    let sample_height = rows * 4;
+    let layout = render_layout_for_dimensions(layout_width, layout_height, options);
     let resized = image
-        .resize_exact(sample_width, sample_height, FilterType::Triangle)
+        .resize_exact(layout.sample_width, layout.sample_height, FilterType::Triangle)
         .to_rgba8();
 
     match options.glyph_mode {
-        GlyphMode::Braille => render_braille_grid_visible(&resized, columns, rows, options),
-        GlyphMode::Solid => render_solid_grid_visible(&resized, columns, rows * 2, options),
+        GlyphMode::Braille => render_braille_grid_visible(&resized, layout.columns, layout.rows, options),
+        GlyphMode::Solid => render_solid_grid_visible(&resized, layout.columns, layout.rows, options),
     }
 }
 

@@ -1,5 +1,5 @@
 use blumdot::{
-    GlyphMode, RenderOptions, extract_layers, render_animation_frame, render_image,
+    GlyphMode, RenderOptions, extract_layers, render_animation_frame, render_image, render_layout,
     render_image_ansi, rotate_image_in_canvas,
 };
 use image::{DynamicImage, ImageBuffer, Rgba};
@@ -192,7 +192,7 @@ fn square_images_use_terminal_cell_aspect_ratio() {
 fn rendered_lines_do_not_exceed_selected_width() {
     let image = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(18, 12, Rgba([0, 0, 0, 255])));
 
-    for width in [10, 16, 24] {
+    for width in [10, 24, 80, 160] {
         let output = render_image(&image, RenderOptions::default().with_width(width));
         let lines: Vec<_> = output.lines().collect();
 
@@ -205,6 +205,20 @@ fn rendered_lines_do_not_exceed_selected_width() {
             lines.iter().all(|line| line.chars().count() <= width as usize),
             "width {width} should cap every rendered line",
         );
+    }
+}
+
+#[test]
+fn render_layout_matches_braille_sampling_geometry() {
+    let image = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(18, 12, Rgba([0, 0, 0, 255])));
+
+    for width in [10, 24, 80, 160] {
+        let layout = render_layout(&image, RenderOptions::default().with_width(width));
+
+        assert_eq!(layout.columns, width);
+        assert!(layout.rows > 0, "width {width} should derive visible rows");
+        assert_eq!(layout.sample_width, width * 2);
+        assert_eq!(layout.sample_height, layout.rows * 4);
     }
 }
 

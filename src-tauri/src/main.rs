@@ -3,7 +3,7 @@
 use base64::{Engine as _, engine::general_purpose};
 use blumdot::{
     GlyphMode, RenderOptions, decode_image_bytes, extract_layers, render_image_ansi,
-    rotate_image_in_canvas,
+    render_layout_for_dimensions, rotate_image_in_canvas,
 };
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
 use serde::{Deserialize, Serialize};
@@ -77,6 +77,21 @@ struct PreviewRequest {
     frame_count: u32,
 }
 
+#[derive(Debug, Deserialize)]
+struct LayoutRequest {
+    width: u32,
+    height: u32,
+    options: GuiRenderOptions,
+}
+
+#[derive(Debug, Serialize)]
+struct RenderLayoutDto {
+    columns: u32,
+    rows: u32,
+    sample_width: u32,
+    sample_height: u32,
+}
+
 struct DecodedLayer {
     base_image: DynamicImage,
     frame_images: HashMap<u32, DynamicImage>,
@@ -93,6 +108,22 @@ async fn import_image(
     tauri::async_runtime::spawn_blocking(move || import_image_blocking(payload, options))
         .await
         .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn render_layout(request: LayoutRequest) -> RenderLayoutDto {
+    let layout = render_layout_for_dimensions(
+        request.width,
+        request.height,
+        request.options.into_render_options(),
+    );
+
+    RenderLayoutDto {
+        columns: layout.columns,
+        rows: layout.rows,
+        sample_width: layout.sample_width,
+        sample_height: layout.sample_height,
+    }
 }
 
 fn import_image_blocking(
@@ -310,6 +341,7 @@ fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             import_image,
+            render_layout,
             render_preview_frames
         ])
         .run(tauri::generate_context!())

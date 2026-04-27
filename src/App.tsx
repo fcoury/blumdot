@@ -5,9 +5,11 @@ import {
   IconEye as Eye,
   IconEyeOff as EyeOff,
   IconFolderOpen as FolderOpen,
+  IconGridDots as GridDots,
   IconLayersSelected as Layers3,
   IconLine as Line,
   IconLoader2 as Loader2,
+  IconPalette as Palette,
   IconPhoto as FileImage,
   IconPhoto as Photo,
   IconPencil as Pencil,
@@ -18,6 +20,7 @@ import {
   IconPlayerStopFilled as Stop,
   IconPlus as Plus,
   IconPointer as Pointer,
+  IconRefresh as RefreshCw,
   IconRotate2 as RotateCcw,
   IconRotateClockwise as RotateCw,
   IconSettings as Settings,
@@ -34,6 +37,15 @@ import sampleCloudUrl from "../assets/codex-color.png";
 type Tool = "pencil" | "line" | "erase" | "picker";
 type EffectKind = "none" | "rotate";
 type EditorZoom = "fit" | 2 | 4 | 8;
+type TerminalFont =
+  | "SF Mono"
+  | "Menlo"
+  | "JetBrains Mono"
+  | "Cascadia Mono"
+  | "Fira Code"
+  | "IBM Plex Mono"
+  | "Courier New"
+  | "Custom";
 
 type RenderOptions = {
   width: number;
@@ -104,6 +116,21 @@ type OutputSize = {
   rows: number | null;
 };
 
+type RenderLayout = {
+  columns: number;
+  rows: number;
+  sample_width: number;
+  sample_height: number;
+};
+
+type TerminalSettings = {
+  fontFamily: TerminalFont;
+  customFont: string;
+  fontSize: number;
+  lineHeight: number;
+  background: string;
+};
+
 const defaultRenderOptions: RenderOptions = {
   width: 24,
   threshold: 180,
@@ -112,10 +139,30 @@ const defaultRenderOptions: RenderOptions = {
   glyph_mode: "braille",
 };
 
-const outputWidthOptions = Array.from({ length: 15 }, (_, index) => index + 10);
+const minOutputWidth = 10;
+const maxOutputWidth = 160;
+const outputWidthPresets = [10, 16, 24, 40, 80, 120, 160];
 const editorZoomLevels: EditorZoom[] = ["fit", 2, 4, 8];
+const terminalFonts: TerminalFont[] = [
+  "SF Mono",
+  "Menlo",
+  "JetBrains Mono",
+  "Cascadia Mono",
+  "Fira Code",
+  "IBM Plex Mono",
+  "Courier New",
+  "Custom",
+];
+const defaultTerminalSettings: TerminalSettings = {
+  fontFamily: "SF Mono",
+  customFont: "",
+  fontSize: 11,
+  lineHeight: 1.16,
+  background: "#20231d",
+};
 const ansiPreviewStart = "\x1b[?25l\x1b[2J\x1b[H";
 const ansiDrawFrame = "\x1b[H\x1b[J";
+const ansiReturnHome = "\x1b[H";
 const ansiPreviewEnd = "\x1b[?25h";
 const previewRenderDelayMs = 320;
 
@@ -126,11 +173,14 @@ function App() {
   const [tool, setTool] = useState<Tool>("pencil");
   const [brushSize, setBrushSize] = useState(14);
   const [brushColor, setBrushColor] = useState("#ffffff");
-  const [previewBackground, setPreviewBackground] = useState("#20231d");
+  const [terminalSettings, setTerminalSettings] = useState(defaultTerminalSettings);
+  const [showTerminalSettings, setShowTerminalSettings] = useState(false);
+  const [showCharacterGrid, setShowCharacterGrid] = useState(false);
   const [editorZoom, setEditorZoom] = useState<EditorZoom>("fit");
   const [frameOnly, setFrameOnly] = useState(true);
   const [frameCount, setFrameCount] = useState(36);
   const [frames, setFrames] = useState<string[]>([]);
+  const [renderLayout, setRenderLayout] = useState<RenderLayout | null>(null);
   const [currentFrame, setCurrentFrame] = useState(0);
   const [playing, setPlaying] = useState(true);
   const [isImporting, setIsImporting] = useState(false);
@@ -147,8 +197,10 @@ function App() {
     overrideCanvas?: HTMLCanvasElement;
     linePreview?: Point;
   } | null>(null);
+  const layoutRequestRef = useRef(0);
   const previewRenderRequestRef = useRef(0);
   const terminalStartedRef = useRef(false);
+  const terminalWrapRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const { ref: terminalRef, write } = useTerminal();
   const [terminalReady, setTerminalReady] = useState(false);
@@ -168,14 +220,18 @@ function App() {
 
   const previewRows = useMemo(() => {
     const frame = frames[currentFrame] ?? "";
-    return Math.max(10, frame.split("\n").length);
-  }, [currentFrame, frames]);
-  const outputSize = useMemo(
-    () => measureRenderedFrame(frames[currentFrame] ?? frames[0] ?? "", renderOptions.width),
-    [currentFrame, frames, renderOptions.width],
-  );
+    return Math.max(10, renderLayout?.rows ?? frame.split("\n").length);
+  }, [currentFrame, frames, renderLayout]);
+  const outputSize = useMemo(() => {
+    if (renderLayout) {
+      return { columns: renderLayout.columns, rows: renderLayout.rows };
+    }
+
+    return measureRenderedFrame(frames[currentFrame] ?? frames[0] ?? "", renderOptions.width);
+  }, [currentFrame, frames, renderLayout, renderOptions.width]);
   const previewCols = renderOptions.width + 1;
   const zoomLabel = editorZoom === "fit" ? "Fit" : `${editorZoom * 100}%`;
+  const terminalStyle = terminalPreviewStyle(terminalSettings);
 
   const updateLayer = useCallback((layerId: string, patch: Partial<Layer>) => {
     setProject((current) => {
@@ -307,11 +363,25 @@ function App() {
         context.restore();
       }
 
+      if (showCharacterGrid && renderLayout) {
+        paintCharacterGrid(context, viewport, renderLayout);
+      }
+
       context.strokeStyle = selectedLayer ? "#43d6d3" : "rgba(255, 255, 255, 0.16)";
       context.lineWidth = selectedLayer ? 2 : 1;
       context.strokeRect(viewport.x - 0.5, viewport.y - 0.5, viewport.width + 1, viewport.height + 1);
     },
-    [brushColor, brushSize, currentFrame, editorZoom, project, selectedLayer, selectedLayerId],
+    [
+      brushColor,
+      brushSize,
+      currentFrame,
+      editorZoom,
+      project,
+      renderLayout,
+      selectedLayer,
+      selectedLayerId,
+      showCharacterGrid,
+    ],
   );
 
   const requestEditorDraw = useCallback(
@@ -348,6 +418,33 @@ function App() {
     window.addEventListener("resize", redraw);
     return () => window.removeEventListener("resize", redraw);
   }, [drawEditor]);
+
+  useEffect(() => {
+    if (!project) {
+      setRenderLayout(null);
+      return;
+    }
+
+    const requestId = ++layoutRequestRef.current;
+    void invoke<RenderLayout>("render_layout", {
+      request: {
+        width: project.width,
+        height: project.height,
+        options: renderOptions,
+      },
+    })
+      .then((layout) => {
+        if (requestId === layoutRequestRef.current) {
+          setRenderLayout(layout);
+        }
+      })
+      .catch((caught) => {
+        if (requestId === layoutRequestRef.current) {
+          setRenderLayout(null);
+          setError(errorMessage(caught));
+        }
+      });
+  }, [project, renderOptions]);
 
   useEffect(() => {
     if (!project) {
@@ -405,7 +502,9 @@ function App() {
       terminalStartedRef.current = true;
     }
 
-    write(`${ansiDrawFrame}${toTerminalFrame(frames[currentFrame] ?? "")}`);
+    write(`${ansiDrawFrame}${toTerminalFrame(frames[currentFrame] ?? "")}${ansiReturnHome}`);
+    window.requestAnimationFrame(() => resetPreviewScroll(terminalWrapRef.current));
+    window.setTimeout(() => resetPreviewScroll(terminalWrapRef.current), 0);
   }, [currentFrame, frames, terminalReady, write]);
 
   useEffect(() => {
@@ -614,9 +713,14 @@ function App() {
   }, []);
 
   const updateOutputWidth = useCallback((width: number) => {
-    setRenderOptions((current) => ({ ...current, width }));
+    const nextWidth = clampOutputWidth(width);
+    setRenderOptions((current) => ({ ...current, width: nextWidth }));
     setFrames([]);
     setCurrentFrame(0);
+  }, []);
+
+  const updateTerminalSettings = useCallback((patch: Partial<TerminalSettings>) => {
+    setTerminalSettings((current) => ({ ...current, ...patch }));
   }, []);
 
   const exportAnsi = useCallback(() => {
@@ -624,7 +728,7 @@ function App() {
       return;
     }
 
-    const payload = `${ansiPreviewStart}${frames.map((frame) => `${ansiDrawFrame}${toTerminalFrame(frame)}`).join("")}${ansiPreviewEnd}`;
+    const payload = `${ansiPreviewStart}${frames.map((frame) => `${ansiDrawFrame}${toTerminalFrame(frame)}${ansiReturnHome}`).join("")}${ansiPreviewEnd}`;
     const url = URL.createObjectURL(new Blob([payload], { type: "text/plain" }));
     const link = document.createElement("a");
     link.href = url;
@@ -907,15 +1011,42 @@ function App() {
               <button className="small-icon" aria-label="Rotate clockwise">
                 <RotateCw size={15} />
               </button>
+              <button
+                className={`button compact-button ${showCharacterGrid ? "active-toggle" : ""}`}
+                onClick={() => setShowCharacterGrid((value) => !value)}
+                aria-pressed={showCharacterGrid}
+                aria-label="Toggle character grid"
+                title="Toggle character grid"
+              >
+                <GridDots size={15} />
+                Grid
+              </button>
             </div>
             <div className="toolbar-section">
               <span>Width</span>
-              <select
+              <input
+                className="width-input"
+                type="number"
+                min={minOutputWidth}
+                max={maxOutputWidth}
+                step={1}
                 value={renderOptions.width}
                 onChange={(event) => updateOutputWidth(Number(event.currentTarget.value))}
                 aria-label="Output width"
+              />
+              <select
+                className="width-preset-select"
+                value=""
+                onChange={(event) => {
+                  const value = Number(event.currentTarget.value);
+                  if (value) {
+                    updateOutputWidth(value);
+                  }
+                }}
+                aria-label="Width presets"
               >
-                {outputWidthOptions.map((width) => (
+                <option value="">Presets</option>
+                {outputWidthPresets.map((width) => (
                   <option key={width} value={width}>
                     {width} cols
                   </option>
@@ -964,8 +1095,9 @@ function App() {
             {(isRendering || isImporting) && <Loader2 className="spin" size={16} />}
           </div>
           <div
+            ref={terminalWrapRef}
             className="terminal-wrap"
-            style={{ "--preview-bg": previewBackground } as React.CSSProperties}
+            style={terminalStyle}
           >
             <div className="terminal-titlebar">
               <span className="traffic red" />
@@ -979,6 +1111,7 @@ function App() {
               cols={previewCols}
               rows={previewRows}
               theme="monokai"
+              style={{ ...terminalStyle, height: "100%" }}
               onReady={() => {
                 terminalStartedRef.current = false;
                 setTerminalReady(true);
@@ -998,16 +1131,121 @@ function App() {
             <button className="button icon-button" onClick={() => setPlaying(false)} aria-label="Stop preview">
               <Stop size={15} />
             </button>
-            <label className="color-picker preview-bg-picker" title="Preview background">
+            <label className="button icon-button preview-bg-button" title="Preview background">
+              <Palette size={16} />
+              <span
+                className="preview-bg-swatch"
+                style={{ backgroundColor: terminalSettings.background }}
+                aria-hidden="true"
+              />
               <input
                 type="color"
-                value={previewBackground}
-                onChange={(event) => setPreviewBackground(event.currentTarget.value)}
+                value={terminalSettings.background}
+                onChange={(event) => updateTerminalSettings({ background: event.currentTarget.value })}
                 aria-label="Preview background"
               />
             </label>
+            <button
+              className={`button icon-button ${showTerminalSettings ? "active-toggle" : ""}`}
+              onClick={() => setShowTerminalSettings((value) => !value)}
+              aria-pressed={showTerminalSettings}
+              aria-label="Terminal settings"
+              title="Terminal settings"
+            >
+              <Settings size={16} />
+            </button>
             <div className="fps-select">{Math.round(1000 / 80)} FPS</div>
           </div>
+          {showTerminalSettings && (
+            <div className="terminal-settings-panel">
+              <div className="terminal-settings-header">
+                <div>
+                  <span>Terminal</span>
+                  <strong>Appearance</strong>
+                </div>
+                <button
+                  className="button secondary reset-terminal-button"
+                  onClick={() => setTerminalSettings(defaultTerminalSettings)}
+                  aria-label="Reset terminal appearance"
+                  title="Reset terminal appearance"
+                >
+                  <RefreshCw size={14} />
+                  Reset
+                </button>
+              </div>
+              <div className="terminal-settings-grid">
+                <label className="terminal-field terminal-font-field">
+                  <span>Font</span>
+                  <select
+                    value={terminalSettings.fontFamily}
+                    onChange={(event) =>
+                      updateTerminalSettings({ fontFamily: event.currentTarget.value as TerminalFont })
+                    }
+                  >
+                    {terminalFonts.map((font) => (
+                      <option key={font} value={font}>
+                        {font}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="terminal-field">
+                  <span>Size</span>
+                  <input
+                    type="number"
+                    min={8}
+                    max={28}
+                    step={1}
+                    value={terminalSettings.fontSize}
+                    onChange={(event) =>
+                      updateTerminalSettings({ fontSize: clampNumber(Number(event.currentTarget.value), 8, 28) })
+                    }
+                  />
+                </label>
+                {terminalSettings.fontFamily === "Custom" && (
+                  <label className="terminal-field terminal-custom-font-field">
+                    <span>Custom font</span>
+                    <input
+                      type="text"
+                      value={terminalSettings.customFont}
+                      placeholder="Font family"
+                      onChange={(event) => updateTerminalSettings({ customFont: event.currentTarget.value })}
+                    />
+                  </label>
+                )}
+                <label className="terminal-field terminal-range-field">
+                  <span>
+                    Line height
+                    <strong>{terminalSettings.lineHeight.toFixed(2)}</strong>
+                  </span>
+                  <input
+                    type="range"
+                    min={0.9}
+                    max={1.8}
+                    step={0.05}
+                    value={terminalSettings.lineHeight}
+                    onChange={(event) =>
+                      updateTerminalSettings({
+                        lineHeight: clampNumber(Number(event.currentTarget.value), 0.9, 1.8),
+                      })
+                    }
+                  />
+                </label>
+                <label className="terminal-field terminal-color-field">
+                  <span>Background</span>
+                  <div className="terminal-color-row">
+                    <input
+                      type="color"
+                      value={terminalSettings.background}
+                      onChange={(event) => updateTerminalSettings({ background: event.currentTarget.value })}
+                      aria-label="Terminal background color"
+                    />
+                    <code>{terminalSettings.background}</code>
+                  </div>
+                </label>
+              </div>
+            </div>
+          )}
           {error && <div className="error-line">{error}</div>}
         </section>
 
@@ -1103,6 +1341,58 @@ function renderOutputSize(size: OutputSize) {
   return `${size.columns} cols × ${size.rows ?? "–"} rows`;
 }
 
+function clampOutputWidth(width: number) {
+  return Math.round(clampNumber(width, minOutputWidth, maxOutputWidth));
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+
+  return Math.max(min, Math.min(max, value));
+}
+
+function terminalPreviewStyle(settings: TerminalSettings) {
+  const fontSize = clampNumber(settings.fontSize, 8, 28);
+  const lineHeight = clampNumber(settings.lineHeight, 0.9, 1.8);
+  const rowHeight = Math.max(1, Math.round(fontSize * lineHeight));
+
+  return {
+    "--preview-bg": settings.background,
+    "--preview-font-family": terminalFontFamilyValue(settings),
+    "--preview-font-size": `${fontSize}px`,
+    "--preview-line-height": String(lineHeight),
+    "--preview-row-height": `${rowHeight}px`,
+  } as React.CSSProperties;
+}
+
+function terminalFontFamilyValue(settings: TerminalSettings) {
+  const font =
+    settings.fontFamily === "Custom"
+      ? settings.customFont.trim() || defaultTerminalSettings.fontFamily
+      : settings.fontFamily;
+
+  return `${quoteFontFamily(font)}, "SF Mono", Menlo, Consolas, monospace`;
+}
+
+function quoteFontFamily(font: string) {
+  return /^[a-z0-9-]+$/i.test(font) ? font : `"${font.replace(/"/g, '\\"')}"`;
+}
+
+function resetPreviewScroll(root: HTMLDivElement | null) {
+  if (!root) {
+    return;
+  }
+
+  root.scrollLeft = 0;
+  root.scrollTop = 0;
+  root.querySelectorAll<HTMLElement>("*").forEach((element) => {
+    element.scrollLeft = 0;
+    element.scrollTop = 0;
+  });
+}
+
 function paintEditorBackdrop(
   context: CanvasRenderingContext2D,
   width: number,
@@ -1121,6 +1411,46 @@ function paintEditorBackdrop(
       context.fill();
     }
   }
+  context.restore();
+}
+
+function paintCharacterGrid(
+  context: CanvasRenderingContext2D,
+  viewport: Viewport,
+  layout: RenderLayout,
+) {
+  const columns = Math.max(1, layout.columns);
+  const rows = Math.max(1, layout.rows);
+  const cellWidth = viewport.width / columns;
+  const cellHeight = viewport.height / rows;
+  const majorEvery = columns >= 80 ? 10 : 5;
+
+  context.save();
+  context.beginPath();
+  context.rect(viewport.x, viewport.y, viewport.width, viewport.height);
+  context.clip();
+
+  context.lineWidth = 1;
+  for (let column = 1; column < columns; column += 1) {
+    const isMajor = column % majorEvery === 0;
+    context.strokeStyle = isMajor ? "rgba(67, 214, 211, 0.5)" : "rgba(238, 242, 239, 0.18)";
+    context.beginPath();
+    const x = viewport.x + column * cellWidth;
+    context.moveTo(x, viewport.y);
+    context.lineTo(x, viewport.y + viewport.height);
+    context.stroke();
+  }
+
+  for (let row = 1; row < rows; row += 1) {
+    const isMajor = row % majorEvery === 0;
+    context.strokeStyle = isMajor ? "rgba(67, 214, 211, 0.5)" : "rgba(238, 242, 239, 0.18)";
+    context.beginPath();
+    const y = viewport.y + row * cellHeight;
+    context.moveTo(viewport.x, y);
+    context.lineTo(viewport.x + viewport.width, y);
+    context.stroke();
+  }
+
   context.restore();
 }
 
