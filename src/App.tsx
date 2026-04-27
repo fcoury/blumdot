@@ -143,6 +143,8 @@ const minOutputWidth = 10;
 const maxOutputWidth = 160;
 const outputWidthPresets = [10, 16, 24, 40, 80, 120, 160];
 const editorZoomLevels: EditorZoom[] = ["fit", 2, 4, 8];
+const terminalFontSizeMin = 8;
+const terminalFontSizeMax = 28;
 const terminalFonts: TerminalFont[] = [
   "SF Mono",
   "Menlo",
@@ -174,6 +176,7 @@ function App() {
   const [brushSize, setBrushSize] = useState(14);
   const [brushColor, setBrushColor] = useState("#ffffff");
   const [terminalSettings, setTerminalSettings] = useState(defaultTerminalSettings);
+  const [fontSizeDraft, setFontSizeDraft] = useState(String(defaultTerminalSettings.fontSize));
   const [showTerminalSettings, setShowTerminalSettings] = useState(false);
   const [showCharacterGrid, setShowCharacterGrid] = useState(false);
   const [editorZoom, setEditorZoom] = useState<EditorZoom>("fit");
@@ -203,7 +206,7 @@ function App() {
   const terminalWrapRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const { ref: terminalRef, write } = useTerminal();
-  const [terminalReady, setTerminalReady] = useState(false);
+  const [terminalReadyRevision, setTerminalReadyRevision] = useState(0);
 
   const selectedLayer = useMemo(
     () => project?.layers.find((layer) => layer.id === selectedLayerId) ?? null,
@@ -232,6 +235,7 @@ function App() {
   const previewCols = renderOptions.width + 1;
   const zoomLabel = editorZoom === "fit" ? "Fit" : `${editorZoom * 100}%`;
   const terminalStyle = terminalPreviewStyle(terminalSettings);
+  const terminalTypographyKey = terminalTypographySignature(terminalSettings);
 
   const updateLayer = useCallback((layerId: string, patch: Partial<Layer>) => {
     setProject((current) => {
@@ -493,7 +497,7 @@ function App() {
   }, [frameCount, previewRenderOptions, project]);
 
   useEffect(() => {
-    if (!terminalReady) {
+    if (terminalReadyRevision === 0) {
       return;
     }
 
@@ -505,7 +509,7 @@ function App() {
     write(`${ansiDrawFrame}${toTerminalFrame(frames[currentFrame] ?? "")}${ansiReturnHome}`);
     window.requestAnimationFrame(() => resetPreviewScroll(terminalWrapRef.current));
     window.setTimeout(() => resetPreviewScroll(terminalWrapRef.current), 0);
-  }, [currentFrame, frames, terminalReady, write]);
+  }, [currentFrame, frames, terminalReadyRevision, write]);
 
   useEffect(() => {
     if (!playing || frames.length < 2) {
@@ -722,6 +726,23 @@ function App() {
   const updateTerminalSettings = useCallback((patch: Partial<TerminalSettings>) => {
     setTerminalSettings((current) => ({ ...current, ...patch }));
   }, []);
+
+  useEffect(() => {
+    setFontSizeDraft(String(terminalSettings.fontSize));
+  }, [terminalSettings.fontSize]);
+
+  const commitFontSizeDraft = useCallback(() => {
+    const parsedFontSize = Number(fontSizeDraft);
+    const nextFontSize =
+      fontSizeDraft.trim() === "" || !Number.isFinite(parsedFontSize)
+        ? terminalSettings.fontSize
+        : clampTerminalFontSize(parsedFontSize);
+
+    setFontSizeDraft(String(nextFontSize));
+    if (nextFontSize !== terminalSettings.fontSize) {
+      updateTerminalSettings({ fontSize: nextFontSize });
+    }
+  }, [fontSizeDraft, terminalSettings.fontSize, updateTerminalSettings]);
 
   const exportAnsi = useCallback(() => {
     if (!frames.length) {
@@ -1106,6 +1127,7 @@ function App() {
               <span>blumdot preview</span>
             </div>
             <Terminal
+              key={terminalTypographyKey}
               ref={terminalRef}
               className="preview-terminal"
               cols={previewCols}
@@ -1114,7 +1136,7 @@ function App() {
               style={{ ...terminalStyle, height: "100%" }}
               onReady={() => {
                 terminalStartedRef.current = false;
-                setTerminalReady(true);
+                setTerminalReadyRevision((revision) => revision + 1);
               }}
               onData={() => undefined}
             />
@@ -1193,13 +1215,30 @@ function App() {
                   <span>Size</span>
                   <input
                     type="number"
-                    min={8}
-                    max={28}
+                    min={terminalFontSizeMin}
+                    max={terminalFontSizeMax}
                     step={1}
-                    value={terminalSettings.fontSize}
-                    onChange={(event) =>
-                      updateTerminalSettings({ fontSize: clampNumber(Number(event.currentTarget.value), 8, 28) })
-                    }
+                    value={fontSizeDraft}
+                    onChange={(event) => {
+                      const nextDraft = event.currentTarget.value;
+                      const nextFontSize = Number(nextDraft);
+
+                      setFontSizeDraft(nextDraft);
+                      if (
+                        nextDraft.trim() !== "" &&
+                        Number.isInteger(nextFontSize) &&
+                        nextFontSize >= terminalFontSizeMin &&
+                        nextFontSize <= terminalFontSizeMax
+                      ) {
+                        updateTerminalSettings({ fontSize: nextFontSize });
+                      }
+                    }}
+                    onBlur={commitFontSizeDraft}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.currentTarget.blur();
+                      }
+                    }}
                   />
                 </label>
                 {terminalSettings.fontFamily === "Custom" && (
@@ -1345,6 +1384,10 @@ function clampOutputWidth(width: number) {
   return Math.round(clampNumber(width, minOutputWidth, maxOutputWidth));
 }
 
+function clampTerminalFontSize(fontSize: number) {
+  return Math.round(clampNumber(fontSize, terminalFontSizeMin, terminalFontSizeMax));
+}
+
 function clampNumber(value: number, min: number, max: number) {
   if (!Number.isFinite(value)) {
     return min;
@@ -1354,7 +1397,7 @@ function clampNumber(value: number, min: number, max: number) {
 }
 
 function terminalPreviewStyle(settings: TerminalSettings) {
-  const fontSize = clampNumber(settings.fontSize, 8, 28);
+  const fontSize = clampTerminalFontSize(settings.fontSize);
   const lineHeight = clampNumber(settings.lineHeight, 0.9, 1.8);
   const rowHeight = Math.max(1, Math.round(fontSize * lineHeight));
 
@@ -1371,6 +1414,14 @@ function terminalPreviewStyle(settings: TerminalSettings) {
     "--term-line-height": String(lineHeight),
     "--term-row-height": `${rowHeight}px`,
   } as React.CSSProperties;
+}
+
+function terminalTypographySignature(settings: TerminalSettings) {
+  return [
+    terminalFontFamilyValue(settings),
+    clampTerminalFontSize(settings.fontSize),
+    clampNumber(settings.lineHeight, 0.9, 1.8),
+  ].join("|");
 }
 
 function terminalFontFamilyValue(settings: TerminalSettings) {

@@ -2,7 +2,7 @@ set dotenv-load
 
 app := "src-tauri/target/debug/bundle/macos/Blumdot.app"
 
-alias c := raw
+alias c := dev
 alias i := install
 
 install:
@@ -37,7 +37,7 @@ raw:
     npm run desktop:raw
 
 dev:
-    npm run dev
+    npm run tauri dev
 
 run sample="assets/codex-color.png" degrees="10":
     cargo run -- animate {{sample}} {{degrees}}
