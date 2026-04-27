@@ -83,3 +83,24 @@ came straight to mind. You can hear it
 cargo test
 cargo run -- <input>
 ```
+
+## Desktop Editor
+
+The GUI lives alongside the CLI as a Tauri + React app. It keeps the Rust
+renderer as the source of truth, adds a layered canvas editor, and streams
+preview frames into `wterm`.
+
+```sh
+npm install
+npm run desktop
+```
+
+`npm run desktop` builds the React app and launches the Tauri shell with Cargo.
+The Tauri crate is compiled with `custom-protocol` so this launch path uses the
+same embedded frontend that a packaged app uses.
+
+The editor can import or drop an image, split the Codex cloud sample into
+`Cloud` and `Prompt glyphs > _` layers, edit the selected layer with pencil,
+line, and eraser tools, and store edits on just the selected frame. The first
+implemented effect is per-layer rotation; the UI also sketches the next effects
+that fit the renderer well: pulse, drift, reveal, and shimmer.

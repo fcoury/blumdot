@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 use image::{DynamicImage, GenericImageView, ImageBuffer, Rgba, imageops::FilterType};
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -15,6 +16,7 @@ const ANSI_CLEAR_SCREEN: &str = "\x1b[2J";
 const ANSI_HOME: &str = "\x1b[H";
 const ANSI_CLEAR_TO_END: &str = "\x1b[J";
 const TRANSPARENT_BLANK: Rgba<u8> = Rgba([255, 255, 255, 0]);
+const BACKGROUND_DISTANCE_THRESHOLD: f32 = 36.0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InputSource {
@@ -94,10 +96,163 @@ struct LoadedImage {
     resources_dir: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ExtractedLayer {
+    pub name: String,
+    pub image: DynamicImage,
+}
+
 pub fn render_source(source: InputSource, options: RenderOptions) -> Result<String> {
     let loaded = load_source(source)?;
     let image = decode_image(&loaded)?;
     Ok(render_image(&image, options))
+}
+
+pub fn decode_image_bytes(bytes: &[u8], hint: Option<&str>) -> Result<DynamicImage> {
+    let loaded = LoadedImage {
+        bytes: bytes.to_vec(),
+        hint: hint.map(str::to_owned),
+        resources_dir: None,
+    };
+
+    decode_image(&loaded)
+}
+
+pub fn extract_layers(image: &DynamicImage, options: RenderOptions) -> Vec<ExtractedLayer> {
+    let source = image.to_rgba8();
+    let (width, height) = source.dimensions();
+    if width == 0 || height == 0 {
+        return vec![ExtractedLayer {
+            name: "Artwork".to_owned(),
+            image: DynamicImage::ImageRgba8(source),
+        }];
+    }
+
+    let background = border_background_color(&source, options.alpha_cutoff);
+    let mut background_like = vec![false; (width * height) as usize];
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0;
+    let mut max_y = 0;
+    let mut found_content = false;
+
+    for y in 0..height {
+        for x in 0..width {
+            let index = pixel_index(width, x, y);
+            let pixel = source.get_pixel(x, y);
+            let is_background = pixel_matches_background(pixel, background, options.alpha_cutoff);
+            background_like[index] = is_background;
+
+            if !is_background {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+                found_content = true;
+            }
+        }
+    }
+
+    if !found_content {
+        return vec![ExtractedLayer {
+            name: "Artwork".to_owned(),
+            image: DynamicImage::ImageRgba8(source),
+        }];
+    }
+
+    let mut artwork = ImageBuffer::from_pixel(width, height, TRANSPARENT_BLANK);
+    for y in 0..height {
+        for x in 0..width {
+            if !background_like[pixel_index(width, x, y)] {
+                artwork.put_pixel(x, y, *source.get_pixel(x, y));
+            }
+        }
+    }
+
+    let border_connected = flood_background_from_edges(width, height, &background_like);
+    let mut glyphs = ImageBuffer::from_pixel(width, height, TRANSPARENT_BLANK);
+    let mut found_glyphs = false;
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let index = pixel_index(width, x, y);
+            if background_like[index] && !border_connected[index] {
+                if let Some(pixel) = nearest_content_pixel(&source, &background_like, x, y) {
+                    artwork.put_pixel(x, y, pixel);
+                }
+                glyphs.put_pixel(
+                    x,
+                    y,
+                    Rgba([background[0], background[1], background[2], 255]),
+                );
+                found_glyphs = true;
+            }
+        }
+    }
+
+    let mut layers = vec![ExtractedLayer {
+        name: "Cloud".to_owned(),
+        image: DynamicImage::ImageRgba8(artwork),
+    }];
+
+    if found_glyphs {
+        layers.push(ExtractedLayer {
+            name: "Prompt glyphs > _".to_owned(),
+            image: DynamicImage::ImageRgba8(glyphs),
+        });
+    }
+
+    layers
+}
+
+fn nearest_content_pixel(
+    image: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    background_like: &[bool],
+    x: u32,
+    y: u32,
+) -> Option<Rgba<u8>> {
+    let (width, height) = image.dimensions();
+    let max_radius = width.max(height);
+
+    for radius in 1..=max_radius {
+        let min_x = x.saturating_sub(radius);
+        let min_y = y.saturating_sub(radius);
+        let max_x = (x + radius).min(width.saturating_sub(1));
+        let max_y = (y + radius).min(height.saturating_sub(1));
+        let mut closest: Option<(u64, Rgba<u8>)> = None;
+
+        for candidate_y in min_y..=max_y {
+            for candidate_x in min_x..=max_x {
+                if candidate_x != min_x
+                    && candidate_x != max_x
+                    && candidate_y != min_y
+                    && candidate_y != max_y
+                {
+                    continue;
+                }
+
+                if background_like[pixel_index(width, candidate_x, candidate_y)] {
+                    continue;
+                }
+
+                let distance_x = i64::from(candidate_x) - i64::from(x);
+                let distance_y = i64::from(candidate_y) - i64::from(y);
+                let distance = (distance_x * distance_x + distance_y * distance_y) as u64;
+                let pixel = *image.get_pixel(candidate_x, candidate_y);
+                if closest
+                    .map(|(closest_distance, _)| distance < closest_distance)
+                    .unwrap_or(true)
+                {
+                    closest = Some((distance, pixel));
+                }
+            }
+        }
+
+        if let Some((_, pixel)) = closest {
+            return Some(pixel);
+        }
+    }
+
+    None
 }
 
 pub fn render_animation_frame(
@@ -166,6 +321,32 @@ pub fn render_image(image: &DynamicImage, options: RenderOptions) -> String {
     render_image_with_layout(image, options, layout_width, layout_height)
 }
 
+pub fn render_image_ansi(image: &DynamicImage, options: RenderOptions) -> String {
+    let rotated;
+    let image = if should_rotate(options.rotation_degrees) {
+        rotated = rotate_about_center(image, options.rotation_degrees);
+        &rotated
+    } else {
+        image
+    };
+    let (layout_width, layout_height) = image.dimensions();
+
+    render_image_ansi_with_layout(image, options, layout_width, layout_height)
+}
+
+pub fn render_image_visible(image: &DynamicImage, options: RenderOptions) -> String {
+    let rotated;
+    let image = if should_rotate(options.rotation_degrees) {
+        rotated = rotate_about_center(image, options.rotation_degrees);
+        &rotated
+    } else {
+        image
+    };
+    let (layout_width, layout_height) = image.dimensions();
+
+    render_image_visible_with_layout(image, options, layout_width, layout_height)
+}
+
 fn render_image_with_layout(
     image: &DynamicImage,
     options: RenderOptions,
@@ -184,6 +365,48 @@ fn render_image_with_layout(
     match options.glyph_mode {
         GlyphMode::Braille => render_braille_grid(&resized, columns, rows, options),
         GlyphMode::Solid => render_solid_grid(&resized, columns, rows * 2, options),
+    }
+}
+
+fn render_image_ansi_with_layout(
+    image: &DynamicImage,
+    options: RenderOptions,
+    layout_width: u32,
+    layout_height: u32,
+) -> String {
+    let columns = options.width.max(1);
+    let aspect = layout_height as f32 / layout_width.max(1) as f32;
+    let rows = ((columns as f32 * aspect * CELL_ASPECT_RATIO).round() as u32).max(1);
+    let sample_width = columns * 2;
+    let sample_height = rows * 4;
+    let resized = image
+        .resize_exact(sample_width, sample_height, FilterType::Triangle)
+        .to_rgba8();
+
+    match options.glyph_mode {
+        GlyphMode::Braille => render_braille_grid_ansi(&resized, columns, rows, options),
+        GlyphMode::Solid => render_solid_grid_ansi(&resized, columns, rows * 2, options),
+    }
+}
+
+fn render_image_visible_with_layout(
+    image: &DynamicImage,
+    options: RenderOptions,
+    layout_width: u32,
+    layout_height: u32,
+) -> String {
+    let columns = options.width.max(1);
+    let aspect = layout_height as f32 / layout_width.max(1) as f32;
+    let rows = ((columns as f32 * aspect * CELL_ASPECT_RATIO).round() as u32).max(1);
+    let sample_width = columns * 2;
+    let sample_height = rows * 4;
+    let resized = image
+        .resize_exact(sample_width, sample_height, FilterType::Triangle)
+        .to_rgba8();
+
+    match options.glyph_mode {
+        GlyphMode::Braille => render_braille_grid_visible(&resized, columns, rows, options),
+        GlyphMode::Solid => render_solid_grid_visible(&resized, columns, rows * 2, options),
     }
 }
 
@@ -227,6 +450,47 @@ impl<W: Write> Drop for AnimationTerminal<'_, W> {
 
 fn should_rotate(degrees: f32) -> bool {
     degrees.is_finite() && degrees.rem_euclid(360.0).abs() > f32::EPSILON
+}
+
+pub fn rotate_image_in_canvas(image: &DynamicImage, degrees: f32) -> DynamicImage {
+    if !should_rotate(degrees) {
+        return image.clone();
+    }
+
+    let source = image.to_rgba8();
+    let (width, height) = source.dimensions();
+    if width == 0 || height == 0 {
+        return DynamicImage::ImageRgba8(source);
+    }
+
+    let radians = degrees.to_radians();
+    let sin = snap_unit(radians.sin());
+    let cos = snap_unit(radians.cos());
+    let center_x = (width as f32 - 1.0) / 2.0;
+    let center_y = (height as f32 - 1.0) / 2.0;
+    let mut output = ImageBuffer::from_pixel(width, height, TRANSPARENT_BLANK);
+
+    for output_y in 0..height {
+        for output_x in 0..width {
+            let centered_x = output_x as f32 - center_x;
+            let centered_y = output_y as f32 - center_y;
+            let source_x = centered_x * cos + centered_y * sin + center_x;
+            let source_y = -centered_x * sin + centered_y * cos + center_y;
+            let source_x = source_x.round() as i32;
+            let source_y = source_y.round() as i32;
+
+            if source_x >= 0 && source_y >= 0 && source_x < width as i32 && source_y < height as i32
+            {
+                output.put_pixel(
+                    output_x,
+                    output_y,
+                    *source.get_pixel(source_x as u32, source_y as u32),
+                );
+            }
+        }
+    }
+
+    DynamicImage::ImageRgba8(output)
 }
 
 fn rotate_about_center(image: &DynamicImage, degrees: f32) -> DynamicImage {
@@ -406,6 +670,126 @@ fn snap_unit(value: f32) -> f32 {
     }
 }
 
+fn pixel_index(width: u32, x: u32, y: u32) -> usize {
+    (y * width + x) as usize
+}
+
+fn border_background_color(image: &ImageBuffer<Rgba<u8>, Vec<u8>>, alpha_cutoff: u8) -> [u8; 3] {
+    let (width, height) = image.dimensions();
+    let mut red = 0u64;
+    let mut green = 0u64;
+    let mut blue = 0u64;
+    let mut count = 0u64;
+
+    for y in 0..height {
+        for x in [0, width.saturating_sub(1)] {
+            let [r, g, b, alpha] = image.get_pixel(x, y).0;
+            if alpha >= alpha_cutoff {
+                red += u64::from(r);
+                green += u64::from(g);
+                blue += u64::from(b);
+                count += 1;
+            }
+        }
+    }
+
+    for x in 0..width {
+        for y in [0, height.saturating_sub(1)] {
+            let [r, g, b, alpha] = image.get_pixel(x, y).0;
+            if alpha >= alpha_cutoff {
+                red += u64::from(r);
+                green += u64::from(g);
+                blue += u64::from(b);
+                count += 1;
+            }
+        }
+    }
+
+    if count == 0 {
+        return [255, 255, 255];
+    }
+
+    [
+        (red / count) as u8,
+        (green / count) as u8,
+        (blue / count) as u8,
+    ]
+}
+
+fn pixel_matches_background(pixel: &Rgba<u8>, background: [u8; 3], alpha_cutoff: u8) -> bool {
+    let [red, green, blue, alpha] = pixel.0;
+    if alpha < alpha_cutoff {
+        return true;
+    }
+
+    let red_delta = f32::from(red) - f32::from(background[0]);
+    let green_delta = f32::from(green) - f32::from(background[1]);
+    let blue_delta = f32::from(blue) - f32::from(background[2]);
+    (red_delta * red_delta + green_delta * green_delta + blue_delta * blue_delta).sqrt()
+        <= BACKGROUND_DISTANCE_THRESHOLD
+}
+
+fn flood_background_from_edges(width: u32, height: u32, background_like: &[bool]) -> Vec<bool> {
+    let mut connected = vec![false; (width * height) as usize];
+    let mut queue = VecDeque::new();
+
+    for x in 0..width {
+        queue_background_pixel(width, x, 0, background_like, &mut connected, &mut queue);
+        queue_background_pixel(
+            width,
+            x,
+            height.saturating_sub(1),
+            background_like,
+            &mut connected,
+            &mut queue,
+        );
+    }
+
+    for y in 0..height {
+        queue_background_pixel(width, 0, y, background_like, &mut connected, &mut queue);
+        queue_background_pixel(
+            width,
+            width.saturating_sub(1),
+            y,
+            background_like,
+            &mut connected,
+            &mut queue,
+        );
+    }
+
+    while let Some((x, y)) = queue.pop_front() {
+        if x > 0 {
+            queue_background_pixel(width, x - 1, y, background_like, &mut connected, &mut queue);
+        }
+        if x + 1 < width {
+            queue_background_pixel(width, x + 1, y, background_like, &mut connected, &mut queue);
+        }
+        if y > 0 {
+            queue_background_pixel(width, x, y - 1, background_like, &mut connected, &mut queue);
+        }
+        if y + 1 < height {
+            queue_background_pixel(width, x, y + 1, background_like, &mut connected, &mut queue);
+        }
+    }
+
+    connected
+}
+
+fn queue_background_pixel(
+    width: u32,
+    x: u32,
+    y: u32,
+    background_like: &[bool],
+    connected: &mut [bool],
+    queue: &mut VecDeque<(u32, u32)>,
+) {
+    let index = pixel_index(width, x, y);
+    if background_like[index] && !connected[index] {
+        connected[index] = true;
+        queue.push_back((x, y));
+    }
+}
+
 fn render_braille_grid(
     image: &ImageBuffer<Rgba<u8>, Vec<u8>>,
     columns: u32,
@@ -420,6 +804,46 @@ fn render_braille_grid(
 
         for cell_x in 0..columns {
             output.push(render_braille_cell(image, cell_x, cell_y, options));
+        }
+    }
+
+    output
+}
+
+fn render_braille_grid_ansi(
+    image: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    columns: u32,
+    rows: u32,
+    options: RenderOptions,
+) -> String {
+    let mut output = String::new();
+    for cell_y in 0..rows {
+        if cell_y > 0 {
+            output.push('\n');
+        }
+
+        for cell_x in 0..columns {
+            output.push_str(&render_braille_cell_ansi(image, cell_x, cell_y, options));
+        }
+    }
+
+    output
+}
+
+fn render_braille_grid_visible(
+    image: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    columns: u32,
+    rows: u32,
+    options: RenderOptions,
+) -> String {
+    let mut output = String::new();
+    for cell_y in 0..rows {
+        if cell_y > 0 {
+            output.push('\n');
+        }
+
+        for cell_x in 0..columns {
+            output.push(render_braille_cell_visible(image, cell_x, cell_y, options));
         }
     }
 
@@ -446,6 +870,46 @@ fn render_solid_grid(
     output
 }
 
+fn render_solid_grid_ansi(
+    image: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    columns: u32,
+    rows: u32,
+    options: RenderOptions,
+) -> String {
+    let mut output = String::new();
+    for cell_y in 0..rows {
+        if cell_y > 0 {
+            output.push('\n');
+        }
+
+        for cell_x in 0..columns {
+            output.push_str(&render_solid_cell_ansi(image, cell_x, cell_y, options));
+        }
+    }
+
+    output
+}
+
+fn render_solid_grid_visible(
+    image: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    columns: u32,
+    rows: u32,
+    options: RenderOptions,
+) -> String {
+    let mut output = String::new();
+    for cell_y in 0..rows {
+        if cell_y > 0 {
+            output.push('\n');
+        }
+
+        for cell_x in 0..columns {
+            output.push(render_solid_cell_visible(image, cell_x, cell_y, options));
+        }
+    }
+
+    output
+}
+
 fn render_braille_cell(
     image: &ImageBuffer<Rgba<u8>, Vec<u8>>,
     cell_x: u32,
@@ -457,6 +921,56 @@ fn render_braille_cell(
         for x in 0..2 {
             let pixel = image.get_pixel(cell_x * 2 + x, cell_y * 4 + y);
             if pixel_is_ink(pixel, options) {
+                mask |= braille_bit(x, y);
+            }
+        }
+    }
+
+    if mask == 0 {
+        ' '
+    } else {
+        char::from_u32(0x2800 + u32::from(mask)).expect("valid braille mask")
+    }
+}
+
+fn render_braille_cell_ansi(
+    image: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    cell_x: u32,
+    cell_y: u32,
+    options: RenderOptions,
+) -> String {
+    let mut mask = 0u8;
+    let mut color = ColorAccumulator::default();
+
+    for y in 0..4 {
+        for x in 0..2 {
+            let pixel = image.get_pixel(cell_x * 2 + x, cell_y * 4 + y);
+            if pixel_is_visible(pixel, options) {
+                mask |= braille_bit(x, y);
+                color.add(pixel);
+            }
+        }
+    }
+
+    if mask == 0 {
+        " ".to_owned()
+    } else {
+        color.paint(char::from_u32(0x2800 + u32::from(mask)).expect("valid braille mask"))
+    }
+}
+
+fn render_braille_cell_visible(
+    image: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    cell_x: u32,
+    cell_y: u32,
+    options: RenderOptions,
+) -> char {
+    let mut mask = 0u8;
+
+    for y in 0..4 {
+        for x in 0..2 {
+            let pixel = image.get_pixel(cell_x * 2 + x, cell_y * 4 + y);
+            if pixel_is_visible(pixel, options) {
                 mask |= braille_bit(x, y);
             }
         }
@@ -488,6 +1002,53 @@ fn render_solid_cell(
     quadrant_block(mask)
 }
 
+fn render_solid_cell_ansi(
+    image: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    cell_x: u32,
+    cell_y: u32,
+    options: RenderOptions,
+) -> String {
+    let mut mask = 0u8;
+    let mut color = ColorAccumulator::default();
+
+    for y in 0..2 {
+        for x in 0..2 {
+            let pixel = image.get_pixel(cell_x * 2 + x, cell_y * 2 + y);
+            if pixel_is_visible(pixel, options) {
+                mask |= quadrant_bit(x, y);
+                color.add(pixel);
+            }
+        }
+    }
+
+    let glyph = quadrant_block(mask);
+    if glyph == ' ' {
+        " ".to_owned()
+    } else {
+        color.paint(glyph)
+    }
+}
+
+fn render_solid_cell_visible(
+    image: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    cell_x: u32,
+    cell_y: u32,
+    options: RenderOptions,
+) -> char {
+    let mut mask = 0u8;
+
+    for y in 0..2 {
+        for x in 0..2 {
+            let pixel = image.get_pixel(cell_x * 2 + x, cell_y * 2 + y);
+            if pixel_is_visible(pixel, options) {
+                mask |= quadrant_bit(x, y);
+            }
+        }
+    }
+
+    quadrant_block(mask)
+}
+
 fn pixel_is_ink(pixel: &Rgba<u8>, options: RenderOptions) -> bool {
     let [red, green, blue, alpha] = pixel.0;
     if alpha < options.alpha_cutoff {
@@ -498,6 +1059,40 @@ fn pixel_is_ink(pixel: &Rgba<u8>, options: RenderOptions) -> bool {
         .round() as u8;
     let dark = luminance < options.threshold;
     if options.invert { !dark } else { dark }
+}
+
+fn pixel_is_visible(pixel: &Rgba<u8>, options: RenderOptions) -> bool {
+    pixel.0[3] >= options.alpha_cutoff
+}
+
+#[derive(Default)]
+struct ColorAccumulator {
+    red: u32,
+    green: u32,
+    blue: u32,
+    weight: u32,
+}
+
+impl ColorAccumulator {
+    fn add(&mut self, pixel: &Rgba<u8>) {
+        let [red, green, blue, alpha] = pixel.0;
+        let weight = u32::from(alpha).max(1);
+        self.red += u32::from(red) * weight;
+        self.green += u32::from(green) * weight;
+        self.blue += u32::from(blue) * weight;
+        self.weight += weight;
+    }
+
+    fn paint(&self, glyph: char) -> String {
+        if self.weight == 0 {
+            return glyph.to_string();
+        }
+
+        let red = self.red / self.weight;
+        let green = self.green / self.weight;
+        let blue = self.blue / self.weight;
+        format!("\x1b[38;2;{red};{green};{blue}m{glyph}\x1b[0m")
+    }
 }
 
 fn quadrant_bit(x: u32, y: u32) -> u8 {

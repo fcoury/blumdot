@@ -1,0 +1,15 @@
+[package]
+name = "blumdot-editor"
+version = "0.1.0"
+edition = "2024"
+
+[build-dependencies]
+tauri-build = { version = "2.5.6", features = [] }
+
+[dependencies]
+base64 = "0.22.1"
+blumdot = { path = ".." }
+image = "0.25.10"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tauri = { version = "2.10.3", features = ["custom-protocol"] }

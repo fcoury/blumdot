@@ -1,4 +1,7 @@
-use blumdot::{GlyphMode, RenderOptions, render_animation_frame, render_image};
+use blumdot::{
+    GlyphMode, RenderOptions, extract_layers, render_animation_frame, render_image,
+    render_image_ansi, rotate_image_in_canvas,
+};
 use image::{DynamicImage, ImageBuffer, Rgba};
 
 #[test]
@@ -151,6 +154,15 @@ fn transparent_pixels_are_blank() {
 }
 
 #[test]
+fn ansi_preview_renders_visible_light_pixels_in_color() {
+    let image = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(2, 4, Rgba([255, 255, 255, 255])));
+
+    let output = render_image_ansi(&image, RenderOptions::default().with_width(1));
+
+    assert_eq!(output, "\x1b[38;2;255;255;255m\u{28ff}\x1b[0m");
+}
+
+#[test]
 fn invert_reverses_luminance_selection() {
     let image = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(2, 4, Rgba([255, 255, 255, 255])));
 
@@ -174,4 +186,59 @@ fn square_images_use_terminal_cell_aspect_ratio() {
 
     assert_eq!(lines.len(), 2);
     assert!(lines.iter().all(|line| line.chars().count() == 4));
+}
+
+#[test]
+fn rendered_lines_do_not_exceed_selected_width() {
+    let image = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(18, 12, Rgba([0, 0, 0, 255])));
+
+    for width in [10, 16, 24] {
+        let output = render_image(&image, RenderOptions::default().with_width(width));
+        let lines: Vec<_> = output.lines().collect();
+
+        assert!(!lines.is_empty(), "width {width} should render at least one line");
+        assert!(
+            lines.iter().any(|line| !line.trim().is_empty()),
+            "width {width} should render visible output",
+        );
+        assert!(
+            lines.iter().all(|line| line.chars().count() <= width as usize),
+            "width {width} should cap every rendered line",
+        );
+    }
+}
+
+#[test]
+fn layer_extraction_splits_colored_artwork_from_enclosed_light_glyphs() {
+    let mut pixels = ImageBuffer::from_pixel(6, 6, Rgba([255, 255, 255, 255]));
+    for y in 1..5 {
+        for x in 1..5 {
+            pixels.put_pixel(x, y, Rgba([56, 96, 240, 255]));
+        }
+    }
+    pixels.put_pixel(2, 2, Rgba([255, 255, 255, 255]));
+    pixels.put_pixel(3, 2, Rgba([255, 255, 255, 255]));
+
+    let layers = extract_layers(&DynamicImage::ImageRgba8(pixels), RenderOptions::default());
+
+    assert_eq!(layers.len(), 2);
+    assert_eq!(layers[0].name, "Cloud");
+    assert_eq!(layers[1].name, "Prompt glyphs > _");
+
+    let cloud = layers[0].image.to_rgba8();
+    let glyphs = layers[1].image.to_rgba8();
+    assert_eq!(cloud.get_pixel(1, 1).0, [56, 96, 240, 255]);
+    assert_eq!(cloud.get_pixel(2, 2).0, [56, 96, 240, 255]);
+    assert_eq!(glyphs.get_pixel(2, 2).0, [255, 255, 255, 255]);
+    assert_eq!(glyphs.get_pixel(1, 1).0[3], 0);
+}
+
+#[test]
+fn rotate_image_in_canvas_keeps_original_dimensions() {
+    let image = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(8, 12, Rgba([0, 0, 0, 255])));
+
+    let rotated = rotate_image_in_canvas(&image, 45.0);
+
+    assert_eq!(rotated.width(), 8);
+    assert_eq!(rotated.height(), 12);
 }
