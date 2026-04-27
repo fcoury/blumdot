@@ -1,8 +1,8 @@
-# blumdot
+# bloomdot
 
 Render images as monochrome Unicode braille art on the command line.
 
-`blumdot` reads a local image or URL, packs every 2×4 pixel block into a single
+`bloomdot` reads a local image or URL, packs every 2×4 pixel block into a single
 braille code point (`U+2800`–`U+28FF`), and prints the result. Raster formats
 are decoded via [`image`](https://crates.io/crates/image); SVG inputs are
 rasterized through [`resvg`](https://crates.io/crates/resvg) before sampling.
@@ -26,9 +26,9 @@ cargo run --release -- <input> [options]
 ## Usage
 
 ```
-blumdot <input> [--width N] [--threshold N] [--invert] [--alpha-cutoff N]
+bloomdot <input> [--width N] [--threshold N] [--invert] [--alpha-cutoff N]
                 [--rotate DEG]
-blumdot animate <input> <degree-step> [--frame-delay-ms N] [--no-loop]
+bloomdot animate <input> <degree-step> [--frame-delay-ms N] [--no-loop]
 ```
 
 `<input>` is either a local image path or an `http(s)://` URL. Remote responses
@@ -46,22 +46,22 @@ are capped at 10 MiB.
 Examples:
 
 ```sh
-blumdot logo.png --width 60
-blumdot https://example.com/icon.svg --invert
-blumdot photo.jpg --threshold 128 --width 80
-blumdot logo.png --rotate 90
-blumdot animate logo.png 10 --width 60
-blumdot animate logo.png 10 --no-loop
+bloomdot logo.png --width 60
+bloomdot https://example.com/icon.svg --invert
+bloomdot photo.jpg --threshold 128 --width 80
+bloomdot logo.png --rotate 90
+bloomdot animate logo.png 10 --width 60
+bloomdot animate logo.png 10 --no-loop
 ```
 
 ## Library
 
-`blumdot` is also a library. The main entry points are `render_source` (load
+`bloomdot` is also a library. The main entry points are `render_source` (load
 and render in one step) and `render_image` (render an in-memory
 `image::DynamicImage`):
 
 ```rust
-use blumdot::{InputSource, RenderOptions, render_source};
+use bloomdot::{InputSource, RenderOptions, render_source};
 
 let art = render_source(
     InputSource::parse("logo.png"),
