@@ -1364,6 +1364,12 @@ function terminalPreviewStyle(settings: TerminalSettings) {
     "--preview-font-size": `${fontSize}px`,
     "--preview-line-height": String(lineHeight),
     "--preview-row-height": `${rowHeight}px`,
+    "--term-bg": settings.background,
+    "--term-color-0": settings.background,
+    "--term-font-family": terminalFontFamilyValue(settings),
+    "--term-font-size": `${fontSize}px`,
+    "--term-line-height": String(lineHeight),
+    "--term-row-height": `${rowHeight}px`,
   } as React.CSSProperties;
 }
 
