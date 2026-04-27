@@ -2,6 +2,12 @@ set dotenv-load
 
 app := "src-tauri/target/debug/bundle/macos/Blumdot.app"
 
+alias c := raw
+alias i := install
+
+install:
+    npm install
+
 default:
     just --list
 
