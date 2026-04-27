@@ -205,7 +205,7 @@ const defaultRenderOptions: RenderOptions = {
   invert: false,
   alpha_cutoff: 16,
   glyph_mode: "braille",
-  color_mode: "ansi",
+  color_mode: "monochrome",
 };
 
 const minOutputWidth = 10;
@@ -232,7 +232,7 @@ const defaultTerminalSettings: TerminalSettings = {
   background: "#20231d",
 };
 const ansiPreviewStart = "\x1b[?25l\x1b[2J\x1b[H";
-const ansiDrawFrame = "\x1b[H\x1b[J";
+const ansiDrawFrame = "\x1b[2J\x1b[H";
 const ansiReturnHome = "\x1b[H";
 const ansiPreviewEnd = "\x1b[?25h";
 const previewRenderDelayMs = 320;
@@ -1301,6 +1301,10 @@ function App() {
     setTerminalSettings((current) => ({ ...current, ...patch }));
   }, []);
 
+  const setPreviewColorMode = useCallback((colorMode: RenderOptions["color_mode"]) => {
+    setRenderOptions((current) => ({ ...current, color_mode: colorMode }));
+  }, []);
+
   useEffect(() => {
     setFontSizeDraft(String(terminalSettings.fontSize));
   }, [terminalSettings.fontSize]);
@@ -1876,6 +1880,24 @@ function App() {
             <button className="button icon-button" onClick={() => setPlaying(false)} aria-label="Stop preview">
               <Stop size={15} />
             </button>
+            <div className="segmented-control preview-mode-control" aria-label="Render mode">
+              <button
+                type="button"
+                className={renderOptions.color_mode === "ansi" ? "active" : ""}
+                onClick={() => setPreviewColorMode("ansi")}
+                aria-pressed={renderOptions.color_mode === "ansi"}
+              >
+                Color
+              </button>
+              <button
+                type="button"
+                className={renderOptions.color_mode === "monochrome" ? "active" : ""}
+                onClick={() => setPreviewColorMode("monochrome")}
+                aria-pressed={renderOptions.color_mode === "monochrome"}
+              >
+                Mono
+              </button>
+            </div>
             <label className="button icon-button preview-bg-button" title="Preview background">
               <Palette size={16} />
               <span
@@ -1925,7 +1947,7 @@ function App() {
                     <button
                       type="button"
                       className={renderOptions.color_mode === "ansi" ? "active" : ""}
-                      onClick={() => setRenderOptions((current) => ({ ...current, color_mode: "ansi" }))}
+                      onClick={() => setPreviewColorMode("ansi")}
                       aria-pressed={renderOptions.color_mode === "ansi"}
                     >
                       Color
@@ -1933,7 +1955,7 @@ function App() {
                     <button
                       type="button"
                       className={renderOptions.color_mode === "monochrome" ? "active" : ""}
-                      onClick={() => setRenderOptions((current) => ({ ...current, color_mode: "monochrome" }))}
+                      onClick={() => setPreviewColorMode("monochrome")}
                       aria-pressed={renderOptions.color_mode === "monochrome"}
                     >
                       Mono
