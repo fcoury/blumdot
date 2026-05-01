@@ -88,6 +88,21 @@ impl Default for AnimationOptions {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AnimationExportOptions {
+    pub render_options: RenderOptions,
+    pub degree_step: f32,
+}
+
+impl Default for AnimationExportOptions {
+    fn default() -> Self {
+        Self {
+            render_options: RenderOptions::default(),
+            degree_step: 10.0,
+        }
+    }
+}
+
 struct LoadedImage {
     bytes: Vec<u8>,
     hint: Option<String>,
@@ -153,6 +168,18 @@ pub fn animate_source<W: Write>(
     Ok(())
 }
 
+pub fn export_animation_source<W: Write>(
+    source: InputSource,
+    options: AnimationExportOptions,
+    writer: &mut W,
+) -> Result<()> {
+    let frame_count = animation_frame_count(options.degree_step)?;
+    let loaded = load_source(source)?;
+    let image = decode_image(&loaded)?;
+
+    write_animation_frames(&image, options, frame_count, writer)
+}
+
 pub fn render_image(image: &DynamicImage, options: RenderOptions) -> String {
     let rotated;
     let image = if should_rotate(options.rotation_degrees) {
@@ -198,6 +225,41 @@ fn animation_frame_count(degree_step: f32) -> Result<u32> {
     }
 
     Ok(frame_count.max(1))
+}
+
+fn write_animation_frames<W: Write>(
+    image: &DynamicImage,
+    options: AnimationExportOptions,
+    frame_count: u32,
+    writer: &mut W,
+) -> Result<()> {
+    for frame_index in 0..frame_count {
+        let rotation_degrees = options.degree_step * frame_index as f32;
+        let output = render_animation_frame(image, options.render_options, rotation_degrees);
+
+        if frame_index > 0 {
+            writeln!(writer)?;
+        }
+        writeln!(
+            writer,
+            "--- frame {}/{} rotation {}deg ---",
+            frame_index + 1,
+            frame_count,
+            format_degrees(rotation_degrees),
+        )?;
+        writeln!(writer, "{output}")?;
+    }
+
+    Ok(())
+}
+
+fn format_degrees(degrees: f32) -> String {
+    let normalized = degrees.rem_euclid(360.0);
+    if (normalized.round() - normalized).abs() < TRIGONOMETRY_EPSILON {
+        format!("{}", normalized.round() as i32)
+    } else {
+        format!("{normalized}")
+    }
 }
 
 struct AnimationTerminal<'writer, W: Write> {

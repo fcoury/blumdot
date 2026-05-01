@@ -93,6 +93,35 @@ fn animates_local_png_with_ansi_redraws() {
 }
 
 #[test]
+fn exports_animation_frames_to_text_file() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("logo.png");
+    let export_path = dir.path().join("frames.txt");
+    fs::write(&path, tiny_png()).unwrap();
+
+    Command::cargo_bin("blumdot")
+        .unwrap()
+        .arg("animate")
+        .arg(&path)
+        .arg("180")
+        .arg("--width")
+        .arg("1")
+        .arg("--frame-delay-ms")
+        .arg("0")
+        .arg("--export-file")
+        .arg(&export_path)
+        .assert()
+        .success()
+        .stdout("");
+
+    let output = fs::read_to_string(export_path).unwrap();
+    assert!(output.contains("--- frame 1/2 rotation 0deg ---"));
+    assert!(output.contains("--- frame 2/2 rotation 180deg ---"));
+    assert!(!output.contains("\x1b[?25l"));
+    assert!(!output.contains("\x1b[2J"));
+}
+
+#[test]
 fn animate_rejects_zero_degree_step() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("logo.png");
@@ -103,6 +132,27 @@ fn animate_rejects_zero_degree_step() {
         .arg("animate")
         .arg(&path)
         .arg("0")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "animation degree step must be non-zero",
+        ));
+}
+
+#[test]
+fn export_rejects_zero_degree_step() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("logo.png");
+    let export_path = dir.path().join("frames.txt");
+    fs::write(&path, tiny_png()).unwrap();
+
+    Command::cargo_bin("blumdot")
+        .unwrap()
+        .arg("animate")
+        .arg(&path)
+        .arg("0")
+        .arg("--export-file")
+        .arg(export_path)
         .assert()
         .failure()
         .stderr(predicate::str::contains(

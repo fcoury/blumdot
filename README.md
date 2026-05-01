@@ -29,6 +29,7 @@ cargo run --release -- <input> [options]
 bloomdot <input> [--width N] [--threshold N] [--invert] [--alpha-cutoff N]
                 [--rotate DEG]
 bloomdot animate <input> <degree-step> [--frame-delay-ms N] [--no-loop]
+                [--export-file PATH]
 ```
 
 `<input>` is either a local image path or an `http(s)://` URL. Remote responses
@@ -42,6 +43,7 @@ are capped at 10 MiB.
 | `--alpha-cutoff`    | `16`    | Alpha values below this are treated as blank.               |
 | `--rotate`          | `0`     | Rotate the source image clockwise before rendering.         |
 | `--no-loop`         | off     | Stop animation after one full rotation.                     |
+| `--export-file`     | unset   | Write one full rotation of animation frames to a text file. |
 
 Examples:
 
@@ -52,6 +54,7 @@ bloomdot photo.jpg --threshold 128 --width 80
 bloomdot logo.png --rotate 90
 bloomdot animate logo.png 10 --width 60
 bloomdot animate logo.png 10 --no-loop
+bloomdot animate logo.png 10 --export-file frames.txt
 ```
 
 ## Library

@@ -1,9 +1,12 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use blumdot::{
-    AnimationOptions, GlyphMode, InputSource, RenderOptions, animate_source, render_source,
+    AnimationExportOptions, AnimationOptions, GlyphMode, InputSource, RenderOptions,
+    animate_source, export_animation_source, render_source,
 };
 use clap::{Args as ClapArgs, Parser, Subcommand};
+use std::fs::File;
 use std::io;
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Debug, Parser)]
@@ -73,6 +76,10 @@ struct AnimateArgs {
     #[arg(long)]
     no_loop: bool,
 
+    /// Write one full rotation of animation frames to a text file.
+    #[arg(long)]
+    export_file: Option<PathBuf>,
+
     #[command(flatten)]
     render: RenderArgs,
 }
@@ -89,17 +96,32 @@ fn run() -> Result<()> {
 
     match args.command {
         Some(Command::Animate(animate)) => {
-            let mut stdout = io::stdout().lock();
-            animate_source(
-                InputSource::parse(animate.input),
-                AnimationOptions {
-                    render_options: render_options(animate.render),
-                    degree_step: animate.degrees,
-                    frame_delay: Duration::from_millis(animate.frame_delay_ms),
-                    loop_animation: !animate.no_loop,
-                },
-                &mut stdout,
-            )?;
+            let render_options = render_options(animate.render);
+            if let Some(export_file) = animate.export_file {
+                let mut file = File::create(&export_file).with_context(|| {
+                    format!("failed to create export file {}", export_file.display())
+                })?;
+                export_animation_source(
+                    InputSource::parse(animate.input),
+                    AnimationExportOptions {
+                        render_options,
+                        degree_step: animate.degrees,
+                    },
+                    &mut file,
+                )?;
+            } else {
+                let mut stdout = io::stdout().lock();
+                animate_source(
+                    InputSource::parse(animate.input),
+                    AnimationOptions {
+                        render_options,
+                        degree_step: animate.degrees,
+                        frame_delay: Duration::from_millis(animate.frame_delay_ms),
+                        loop_animation: !animate.no_loop,
+                    },
+                    &mut stdout,
+                )?;
+            }
         }
         None => {
             let input = args
